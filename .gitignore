@@ -1,3 +1,35 @@
+# Rust
 /target
-/skills
-AGENTS.md
+**/*.rs.bk
+*.pdb
+Cargo.lock
+
+# IDE
+.idea/
+.vscode/
+.qwen/
+.codex/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build
+/release
+/debug
+
+# Test coverage
+*.gcno
+*.gcda
+*.gcov
+
+# Documentation
+/docs/generated/
+/docs/IMPLEMENTATION_STATUS.md
+
+# Environment
+.env
+.env.local
