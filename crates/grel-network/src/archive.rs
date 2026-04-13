@@ -214,18 +214,26 @@ fn install_plain_binary(
     bin_dir: &Path,
     filename: &str,
 ) -> Result<InstallResult, NetworkError> {
-    // Copy archive to install dir
+    // Ensure both directories exist before writing into them.
+    std::fs::create_dir_all(install_dir).map_err(|e| {
+        NetworkError::OperationFailed(format!("Failed to create install dir: {e}"))
+    })?;
+    std::fs::create_dir_all(bin_dir).map_err(|e| {
+        NetworkError::OperationFailed(format!("Failed to create bin dir: {e}"))
+    })?;
+
     let dest = install_dir.join(filename);
     std::fs::copy(source_path, &dest).map_err(|e| {
         NetworkError::OperationFailed(format!("Failed to copy binary: {e}"))
     })?;
 
-    // Symlink from bin_dir to the actual binary (so it can find sibling DLLs)
+    // Make target executable on Unix before linking, so the link inherits the bit.
+    make_executable(&dest)?;
+
+    // Symlink/hardlink/copy from bin_dir → install_dir so that sibling DLLs
+    // (Windows) or SOs can still be found relative to the real location.
     let link_path = bin_dir.join(filename);
     create_binary_link(&dest, &link_path)?;
-
-    // Make target executable on Unix (for the actual binary in install_dir)
-    make_executable(&dest)?;
 
     Ok(InstallResult {
         install_dir: install_dir.to_path_buf(),
@@ -234,12 +242,17 @@ fn install_plain_binary(
     })
 }
 
-/// Detect binaries in extracted tree and symlink them to bin_dir
+/// Detect binaries in extracted tree and symlink them to bin_dir.
 fn link_binaries(
     install_dir: &Path,
     bin_dir: &Path,
     _archive_name: &str,
 ) -> Result<InstallResult, NetworkError> {
+    // Ensure bin_dir exists before we attempt to create any links inside it.
+    std::fs::create_dir_all(bin_dir).map_err(|e| {
+        NetworkError::OperationFailed(format!("Failed to create bin dir: {e}"))
+    })?;
+
     let extracted = install_dir.join("extracted");
     let mut installed = Vec::new();
 
@@ -248,7 +261,7 @@ fn link_binaries(
     }
 
     // If no binaries found in extracted/, check if the archive contained
-    // a single top-level binary (common for Go releases)
+    // a single top-level binary (common for Go releases).
     if installed.is_empty() {
         for entry in std::fs::read_dir(install_dir).map_err(|e| {
             NetworkError::OperationFailed(format!("Failed to read install dir: {e}"))
@@ -257,7 +270,7 @@ fn link_binaries(
                 NetworkError::OperationFailed(format!("Failed to read dir entry: {e}"))
             })?;
             let path = entry.path();
-            if path.is_file() && is_executable_name(&path) {
+            if path.is_file() && is_executable(&path) {
                 let dest = bin_dir.join(path.file_name().unwrap());
                 create_binary_link(&path, &dest)?;
                 installed.push(dest);
@@ -272,7 +285,7 @@ fn link_binaries(
     })
 }
 
-/// Recursively find executable files in a directory tree and symlink to bin_dir
+/// Recursively find executable files in a directory tree and symlink to bin_dir.
 fn collect_binaries(
     dir: &Path,
     bin_dir: &Path,
@@ -288,7 +301,7 @@ fn collect_binaries(
 
         if path.is_dir() {
             collect_binaries(&path, bin_dir, installed)?;
-        } else if path.is_file() && is_executable_name(&path) {
+        } else if path.is_file() && is_executable(&path) {
             let dest = bin_dir.join(path.file_name().unwrap());
             create_binary_link(&path, &dest)?;
             installed.push(dest);
@@ -344,14 +357,41 @@ fn symlink_binary(target: &Path, dest: &Path) -> Result<(), std::io::Error> {
     }
 }
 
-/// Check if a filename looks like an executable
+/// Returns `true` if `path` should be treated as an executable binary.
+///
+/// **Unix** – primary check: the file has at least one execute permission
+/// bit set (as preserved by `tar`/`zip` extractors).  This reliably
+/// distinguishes `rg` (executable) from `UNLICENSE`, shell-completion
+/// scripts, man pages, etc.  The name heuristic is used only when
+/// `fs::metadata` fails.
+///
+/// **Windows** – there is no execute-bit concept, so we rely entirely on
+/// file-extension heuristics (`.exe`, `.bat`, `.cmd`, `.ps1`, `.com`).
+/// A file without a recognised extension is never treated as executable on
+/// Windows (correct: plain binaries don't exist there).
+fn is_executable(path: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(meta) = std::fs::metadata(path) {
+            return meta.permissions().mode() & 0o111 != 0;
+        }
+        // metadata unavailable: fall through to name heuristic
+    }
+    is_executable_name(path)
+}
+
+/// Name-based heuristic for executable detection.
+///
+/// Used on Windows (primary path) and as a Unix fallback when the
+/// execute bit cannot be read.
 fn is_executable_name(path: &Path) -> bool {
     let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
         return false;
     };
     let lower = name.to_lowercase();
 
-    // Known executable extensions
+    // Recognised executable extensions on all platforms.
     if lower.ends_with(".exe")
         || lower.ends_with(".bat")
         || lower.ends_with(".cmd")
@@ -362,13 +402,34 @@ fn is_executable_name(path: &Path) -> bool {
         return true;
     }
 
-    // No extension: likely a Unix binary
-    if !name.contains('.') {
-        let skip = ["readme", "license", "changelog", "changes", "copying"];
-        return !skip.iter().any(|&s| lower.starts_with(s));
-    }
+    // On Windows a file without a recognised extension is not an executable.
+    #[cfg(windows)]
+    return false;
 
-    false
+    // Unix fallback: files without any extension *may* be binaries, but
+    // exclude well-known text / data filenames that appear extension-less.
+    #[cfg(not(windows))]
+    {
+        if !lower.contains('.') {
+            const SKIP: &[&str] = &[
+                "readme",
+                "license",
+                "unlicense",
+                "copying",
+                "changelog",
+                "changes",
+                "notice",
+                "authors",
+                "contributors",
+                "credits",
+                "makefile",
+                "dockerfile",
+                "procfile",
+            ];
+            return !SKIP.iter().any(|&s| lower.starts_with(s));
+        }
+        false
+    }
 }
 
 /// Add execute permission on Unix
@@ -455,19 +516,141 @@ fn sanitize_tar_path(entry_path: &Path) -> Result<String, NetworkError> {
 mod tests {
     use super::*;
 
+    // ── is_executable_name (name heuristic, both platforms) ─────────────────
+
     #[test]
-    fn test_is_executable_name() {
+    fn test_exec_name_windows_extensions() {
+        // .exe / .bat / .cmd / .ps1 / .com / .bin are always executable
         assert!(is_executable_name(Path::new("tool.exe")));
         assert!(is_executable_name(Path::new("script.bat")));
-        assert!(is_executable_name(Path::new("rg")));
+        assert!(is_executable_name(Path::new("run.cmd")));
+        assert!(is_executable_name(Path::new("deploy.ps1")));
+        assert!(is_executable_name(Path::new("prog.com")));
+        assert!(is_executable_name(Path::new("helper.bin")));
+    }
+
+    #[test]
+    fn test_exec_name_non_executables_with_extension() {
+        // Files with non-executable extensions are never selected
         assert!(!is_executable_name(Path::new("readme.md")));
         assert!(!is_executable_name(Path::new("config.json")));
+        assert!(!is_executable_name(Path::new("rg.1")));        // man page
+        assert!(!is_executable_name(Path::new("data.csv")));
+        assert!(!is_executable_name(Path::new("lib.so")));      // shared lib
+        assert!(!is_executable_name(Path::new("arch.tar.gz"))); // nested ext
     }
+
+    /// On Unix, extension-less well-known text files must be excluded.
+    #[cfg(not(windows))]
+    #[test]
+    fn test_exec_name_unix_known_text_files_skipped() {
+        assert!(!is_executable_name(Path::new("LICENSE")));
+        assert!(!is_executable_name(Path::new("UNLICENSE")));
+        assert!(!is_executable_name(Path::new("README")));
+        assert!(!is_executable_name(Path::new("CHANGELOG")));
+        assert!(!is_executable_name(Path::new("COPYING")));
+        assert!(!is_executable_name(Path::new("NOTICE")));
+        assert!(!is_executable_name(Path::new("AUTHORS")));
+        assert!(!is_executable_name(Path::new("CONTRIBUTORS")));
+        assert!(!is_executable_name(Path::new("Makefile")));
+        assert!(!is_executable_name(Path::new("Dockerfile")));
+        assert!(!is_executable_name(Path::new("Procfile")));
+    }
+
+    /// On Unix, extension-less names that are NOT in the skip list are
+    /// considered potential binaries by the name heuristic.
+    #[cfg(not(windows))]
+    #[test]
+    fn test_exec_name_unix_no_extension_is_binary() {
+        assert!(is_executable_name(Path::new("rg")));
+        assert!(is_executable_name(Path::new("ripgrep")));
+        assert!(is_executable_name(Path::new("fd")));
+        assert!(is_executable_name(Path::new("bat")));
+    }
+
+    /// On Windows, a file without a recognised extension is NOT executable.
+    #[cfg(windows)]
+    #[test]
+    fn test_exec_name_windows_no_extension_not_executable() {
+        assert!(!is_executable_name(Path::new("rg")));
+        assert!(!is_executable_name(Path::new("UNLICENSE")));
+        assert!(!is_executable_name(Path::new("LICENSE")));
+    }
+
+    // ── is_executable (permission-bit check on Unix) ─────────────────────────
+
+    /// On Unix, verify that `is_executable` respects the execute bit and
+    /// correctly rejects files that have no execute permission, regardless
+    /// of whether their name looks like a binary.
+    #[cfg(unix)]
+    #[test]
+    fn test_is_executable_unix_permission_bit() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("tmpdir");
+
+        // Create a file that has the execute bit set → should be selected.
+        let bin_path = dir.path().join("mytool");
+        std::fs::write(&bin_path, b"#!/bin/sh\necho hi").unwrap();
+        let mut perms = std::fs::metadata(&bin_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&bin_path, perms).unwrap();
+        assert!(is_executable(&bin_path), "executable bit set → selected");
+
+        // Create UNLICENSE with no execute bit → must NOT be selected.
+        let license_path = dir.path().join("UNLICENSE");
+        std::fs::write(&license_path, b"Public domain").unwrap();
+        let mut perms = std::fs::metadata(&license_path).unwrap().permissions();
+        perms.set_mode(0o644);
+        std::fs::set_permissions(&license_path, perms).unwrap();
+        assert!(!is_executable(&license_path), "UNLICENSE has no exec bit → skipped");
+
+        // A shell-completion script (_rg) without the execute bit → skipped.
+        let comp_path = dir.path().join("_rg");
+        std::fs::write(&comp_path, b"#compdef rg").unwrap();
+        let mut perms = std::fs::metadata(&comp_path).unwrap().permissions();
+        perms.set_mode(0o644);
+        std::fs::set_permissions(&comp_path, perms).unwrap();
+        assert!(!is_executable(&comp_path), "completion script (no exec bit) → skipped");
+    }
+
+    // ── path-traversal rejection ─────────────────────────────────────────────
 
     #[test]
     fn test_path_traversal_rejected() {
         assert!(sanitize_path_components("../evil.txt").is_err());
         assert!(sanitize_path_components("/etc/passwd").is_err());
         assert!(sanitize_path_components("safe/file.txt").is_ok());
+    }
+
+    // ── bin_dir creation ──────────────────────────────────────────────────────
+
+    /// `link_binaries` must create bin_dir even when it doesn't exist yet.
+    #[test]
+    fn test_link_binaries_creates_bin_dir() {
+        let root = tempfile::tempdir().expect("tmpdir");
+        let install_dir = root.path().join("pkg");
+        let bin_dir = root.path().join("bin"); // does not exist yet
+
+        std::fs::create_dir_all(&install_dir).unwrap();
+        // extracted/ dir with a single executable
+        let extracted = install_dir.join("extracted");
+        std::fs::create_dir_all(&extracted).unwrap();
+
+        let bin_path = extracted.join("mytool");
+        std::fs::write(&bin_path, b"ELF").unwrap();
+
+        // Give it the execute bit on Unix so is_executable returns true.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut p = std::fs::metadata(&bin_path).unwrap().permissions();
+            p.set_mode(0o755);
+            std::fs::set_permissions(&bin_path, p).unwrap();
+        }
+
+        let result = link_binaries(&install_dir, &bin_dir, "mytool.tar.gz");
+        assert!(result.is_ok(), "link_binaries should not fail: {:?}", result);
+        assert!(bin_dir.exists(), "bin_dir must be created by link_binaries");
     }
 }
