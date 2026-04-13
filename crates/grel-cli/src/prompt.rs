@@ -22,27 +22,27 @@ pub fn ask_confirmation(prompt: &str, default_yes: bool) -> bool {
 
 /// Display a warning message
 pub fn warn(message: &str) {
-    eprintln!("⚠️  {message}");
+    eprintln!("Warning: {message}");
 }
 
 /// Display an info message
 pub fn info(message: &str) {
-    eprintln!("ℹ️  {message}");
+    eprintln!("Info: {message}");
 }
 
 /// Display an error message
 pub fn error(message: &str) {
-    eprintln!("❌ {message}");
+    eprintln!("Error: {message}");
 }
 
 /// Display a success message
 pub fn success(message: &str) {
-    eprintln!("✅ {message}");
+    eprintln!("Ok: {message}");
 }
 
 /// Display a tip message
 pub fn tip(message: &str) {
-    eprintln!("💡 {message}");
+    eprintln!("Tip: {message}");
 }
 
 /// Prompt user to select from a numbered list
@@ -65,3 +65,23 @@ pub fn is_interactive() -> bool {
     use std::io::IsTerminal;
     std::io::stdin().is_terminal()
 }
+
+/// Format a byte size for display
+pub fn format_size(bytes: u64) -> String {
+    if bytes == 0 {
+        return "unknown".into();
+    }
+    let units = ["B", "KB", "MB", "GB"];
+    let mut size = bytes as f64;
+    let mut unit_idx = 0;
+    while size >= 1024.0 && unit_idx < units.len() - 1 {
+        size /= 1024.0;
+        unit_idx += 1;
+    }
+    if unit_idx == 0 {
+        format!("{:.0} {}", size, units[unit_idx])
+    } else {
+        format!("{:.1} {}", size, units[unit_idx])
+    }
+}
+

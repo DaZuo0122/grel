@@ -84,6 +84,18 @@ pub enum SelectionResult {
     MultipleAssets(Vec<RemoteAsset>),
 }
 
+/// Full resolution result including the default selection and all
+/// compatible alternatives (for display/selection).
+#[derive(Debug, Clone)]
+pub struct AssetSelection {
+    /// The top-ranked asset (the one that would be auto-selected)
+    pub default: RemoteAsset,
+    /// All other compatible assets, sorted by priority
+    pub alternatives: Vec<RemoteAsset>,
+    /// Whether the default asset is unmanaged (matches exclude_keywords or ignore_formats)
+    pub default_is_managed: bool,
+}
+
 /// Resolve assets to a selection
 pub fn resolve_assets(
     assets: &[RemoteAsset],
@@ -221,6 +233,83 @@ fn format_matches(format: &str, pattern: &str) -> bool {
 fn is_keyword_excluded(filename: &str, keywords: &[String]) -> bool {
     let lower = filename.to_lowercase();
     keywords.iter().any(|k| lower.contains(&k.to_lowercase()))
+}
+
+/// Filter and sort assets, returning the full selection info for
+/// interactive display. Returns `None` if no compatible assets exist.
+pub fn resolve_assets_detailed(
+    assets: &[RemoteAsset],
+    target_os: &Os,
+    target_arch: &Arch,
+    config: &ResolverConfig,
+    allow_keyword: bool,
+) -> Option<AssetSelection> {
+    let filtered: Vec<RemoteAsset> = assets
+        .iter()
+        .filter(|a| {
+            a.tokens.os == *target_os || matches!(a.tokens.os, Os::Unknown(_))
+        })
+        .filter(|a| {
+            arch_matches(
+                &a.tokens.arch,
+                target_arch,
+                config.fallback_to_32bit,
+                config.prefer_32bit_on_64bit,
+            )
+        })
+        .filter(|a| {
+            allow_keyword || !is_keyword_excluded(&a.tokens.filename, &config.exclude_keywords)
+        })
+        .filter(|a| {
+            !is_format_ignored(&a.tokens.format, &config.ignore_formats)
+        })
+        .cloned()
+        .collect();
+
+    if filtered.is_empty() {
+        return None;
+    }
+
+    let mut sorted = filtered;
+    sorted.sort_by(|a, b| {
+        let arch_a = arch_priority_index(&a.tokens.arch, target_arch);
+        let arch_b = arch_priority_index(&b.tokens.arch, target_arch);
+        arch_a.cmp(&arch_b)
+            .then(
+                format_priority_index(&a.tokens.format, &config.prefer_formats).cmp(
+                    &format_priority_index(&b.tokens.format, &config.prefer_formats),
+                ),
+            )
+            .then(a.filename.cmp(&b.filename))
+            .then(b.size_bytes.unwrap_or(0).cmp(&a.size_bytes.unwrap_or(0)))
+    });
+
+    if sorted.len() == 1 {
+        return Some(AssetSelection {
+            default: sorted.into_iter().next().unwrap(),
+            alternatives: vec![],
+            default_is_managed: false, // will be determined by caller
+        });
+    }
+
+    // Apply selection policy
+    let (default, alternatives) = match &config.default_selection_policy {
+        SelectionPolicy::First => {
+            let default = sorted.remove(0);
+            (default, sorted)
+        }
+        SelectionPolicy::Largest => {
+            sorted.sort_by_key(|a| std::cmp::Reverse(a.size_bytes.unwrap_or(0)));
+            let default = sorted.remove(0);
+            (default, sorted)
+        }
+    };
+
+    Some(AssetSelection {
+        default,
+        alternatives,
+        default_is_managed: false,
+    })
 }
 
 /// Check if format is in ignore list

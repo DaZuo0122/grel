@@ -1,11 +1,13 @@
 //! grel - A package manager for pre-built binaries from Git forges
 
+use std::io;
+
 use anyhow::{Context, Result};
 use clap::Parser;
 use grel_cache::{Database, models};
 use grel_cli::{Cli, Operation};
 use grel_config::{load_config, Config};
-use grel_core::{PackageRef, Os, Arch, ResolverConfig, resolve_assets, SelectionResult, RemoteAsset};
+use grel_core::{PackageRef, Os, Arch, ResolverConfig, RemoteAsset};
 use grel_core::Forge;
 use grel_network::build_http_client;
 use grel_providers::ProviderRegistry;
@@ -237,183 +239,283 @@ async fn cmd_sync(
         // Convert provider assets to RemoteAssets
         let remote_assets: Vec<RemoteAsset> = release.assets.clone();
 
-        // Resolve the best asset
-        let selection = resolve_assets(
+        // Resolve assets with full details (default + alternatives)
+        let Some(mut sel) = grel_core::resolve_assets_detailed(
             &remote_assets,
             &host_os,
             &host_arch,
             &resolver_config,
             allow_keyword,
-        );
+        ) else {
+            eprintln!(
+                "  {}",
+                format!("No compatible assets for {host_os}/{host_arch}").red()
+            );
+            continue;
+        };
 
-        match selection {
-            SelectionResult::NoCompatibleAssets => {
-                eprintln!(
-                    "  {}",
-                    format!("No compatible assets for {host_os}/{host_arch}").red()
-                );
+        // Determine if default asset is managed
+        let is_managed_default = is_asset_managed(&sel.default, &config.assets);
+        sel.default_is_managed = is_managed_default;
+
+        // Interactive confirmation / alternative selection
+        let chosen_asset = match confirm_asset_selection(
+            &sel,
+            &config,
+            noconfirm,
+            allow_keyword,
+        ) {
+            Some(asset) => asset,
+            None => {
+                eprintln!("  Skipped");
                 continue;
             }
-            SelectionResult::SingleAsset(asset) => {
-                // Check if this is an unmanaged asset
-                let is_managed = is_asset_managed(&asset, &config.assets);
+        };
 
-                if !is_managed {
-                    eprintln!(
-                        "  {}",
-                        format!("Warning: Asset \"{}\" requires manual installation.", asset.filename).yellow()
-                    );
-                    eprintln!(
-                        "  {}",
-                        format!("Info: Will download to {}.", config.paths.download_dir.display()).yellow()
-                    );
+        let is_managed = is_asset_managed(&chosen_asset, &config.assets);
 
-                    // In non-interactive mode (pipe/CI), auto-accept
-                    if !noconfirm && !grel_cli::is_interactive() {
-                        eprintln!("  Info: Non-interactive mode, accepting unmanaged asset");
-                    } else if !noconfirm {
-                        let accepted = grel_cli::ask_confirmation(
-                            "  Proceed with download?",
-                            true,
-                        );
-                        if !accepted {
-                            eprintln!("  Skipped");
-                            continue;
-                        }
-                    }
-                }
+        // Determine paths
+        let install_dir = if is_managed {
+            config.paths.install_root.join(format!(
+                "{}/{}/{}",
+                pkg_ref.forge, pkg_ref.owner, pkg_ref.repo
+            ))
+        } else {
+            config.paths.download_dir.clone()
+        };
+        let archive_path = install_dir.join(&chosen_asset.filename);
 
-                // Determine paths
-                let install_dir = if is_managed {
-                    config.paths.install_root.join(format!(
-                        "{}/{}/{}",
-                        pkg_ref.forge, pkg_ref.owner, pkg_ref.repo
-                    ))
-                } else {
-                    config.paths.download_dir.clone()
-                };
-                let archive_path = install_dir.join(&asset.filename);
-
-                println!(
-                    "  Downloading: {} ({})",
-                    asset.filename,
-                    format_size(asset.size_bytes.unwrap_or(0))
-                );
-
-                if cli.dry_run {
-                    println!("  {}", "(dry-run: skipping download)".yellow());
-                    continue;
-                }
-
-                // Ensure destination exists
-                std::fs::create_dir_all(&install_dir).map_err(|e| {
-                    anyhow::anyhow!("Failed to create directory '{}': {e}", install_dir.display())
-                })?;
-
-                // Download the asset
-                let checksum = grel_network::download::download_file(
-                    &client,
-                    &asset.url,
-                    &archive_path,
-                    None,
-                )
-                .await
-                .with_context(|| format!("Failed to download {}", asset.filename))?;
-
-                // If managed, extract and install
-                let installed_binaries = if is_managed {
-                    match grel_network::archive::install_asset(
-                        &archive_path,
-                        &install_dir,
-                        &config.paths.bin_dir,
-                        &asset.filename,
-                    ) {
-                        Ok(result) => {
-                            if !result.installed_binaries.is_empty() {
-                                println!(
-                                    "  {}",
-                                    format!(
-                                        "Installed {} binary(s) to {}",
-                                        result.installed_binaries.len(),
-                                        config.paths.bin_dir.display()
-                                    )
-                                    .green()
-                                );
-                            } else if result.is_plain_binary {
-                                println!("  {}", "Installed binary".green());
-                            }
-                            result.installed_binaries
-                        }
-                        Err(e) => {
-                            eprintln!(
-                                "  {}",
-                                format!("Warning: Failed to extract: {e}").yellow()
-                            );
-                            vec![]
-                        }
-                    }
-                } else {
-                    vec![]
-                };
-
-                // Convert binary paths to filenames for DB tracking
-                let bin_filenames: Vec<String> = installed_binaries
-                    .iter()
-                    .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
-                    .collect();
-
-                // Optionally clean up the downloaded archive
-                if is_managed && !config.general.keep_archives && archive_path.exists() {
-                    std::fs::remove_file(&archive_path).ok();
-                    println!(
-                        "  {}",
-                        "Cleaned up downloaded archive".dimmed()
-                    );
-                }
-
-                // Update database
-                let mut pkg = models::InstalledPackage::new(
-                    pkg_ref.forge.to_string(),
-                    pkg_ref.owner.clone(),
-                    pkg_ref.repo.clone(),
-                );
-                pkg.version = release.tag.clone();
-                pkg.asset_filename = asset.filename.clone();
-                pkg.checksum = Some(checksum);
-                pkg.install_path = install_dir.to_string_lossy().to_string();
-                pkg.set_binary_list(bin_filenames);
-                pkg.is_managed = is_managed;
-                pkg.status = models::PackageStatus::Active;
-
-                db.upsert_package(&pkg)
-                    .await
-                    .with_context(|| "Failed to update package record")?;
-
-                println!(
-                    "  {}",
-                    format!("Installed {} v{}", pkg_ref.to_short_ref(), release.tag).green()
-                );
-            }
-            SelectionResult::MultipleAssets(assets) => {
-                eprintln!(
-                    "  {}",
-                    format!("Warning: Multiple compatible assets found ({})", assets.len()).yellow()
-                );
-                for (i, asset) in assets.iter().enumerate() {
-                    println!(
-                        "    {}) {} ({})",
-                        i + 1,
-                        asset.filename,
-                        format_size(asset.size_bytes.unwrap_or(0))
-                    );
-                }
-                println!("  {}", "Auto-selecting first asset".yellow());
-            }
+        if cli.dry_run {
+            println!(
+                "  {}",
+                format!("(dry-run: would download {})", chosen_asset.filename).yellow()
+            );
+            continue;
         }
+
+        // Ensure destination exists
+        std::fs::create_dir_all(&install_dir).map_err(|e| {
+            anyhow::anyhow!("Failed to create directory '{}': {e}", install_dir.display())
+        })?;
+
+        println!(
+            "  Downloading: {} ({})",
+            chosen_asset.filename,
+            format_size(chosen_asset.size_bytes.unwrap_or(0))
+        );
+
+        // Download the asset
+        let checksum = grel_network::download::download_file(
+            &client,
+            &chosen_asset.url,
+            &archive_path,
+            None,
+        )
+        .await
+        .with_context(|| format!("Failed to download {}", chosen_asset.filename))?;
+
+        // If managed, extract and install
+        let installed_binaries = if is_managed {
+            match grel_network::archive::install_asset(
+                &archive_path,
+                &install_dir,
+                &config.paths.bin_dir,
+                &chosen_asset.filename,
+            ) {
+                Ok(result) => {
+                    if !result.installed_binaries.is_empty() {
+                        println!(
+                            "  {}",
+                            format!(
+                                "Installed {} binary(s) to {}",
+                                result.installed_binaries.len(),
+                                config.paths.bin_dir.display()
+                            )
+                            .green()
+                        );
+                    } else if result.is_plain_binary {
+                        println!("  {}", "Installed binary".green());
+                    }
+                    result.installed_binaries
+                }
+                Err(e) => {
+                    eprintln!(
+                        "  {}",
+                        format!("Warning: Failed to extract: {e}").yellow()
+                    );
+                    vec![]
+                }
+            }
+        } else {
+            vec![]
+        };
+
+        // Convert binary paths to filenames for DB tracking
+        let bin_filenames: Vec<String> = installed_binaries
+            .iter()
+            .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
+            .collect();
+
+        // Optionally clean up the downloaded archive
+        if is_managed && !config.general.keep_archives && archive_path.exists() {
+            std::fs::remove_file(&archive_path).ok();
+            println!(
+                "  {}",
+                "Cleaned up downloaded archive".dimmed()
+            );
+        }
+
+        // Update database
+        let mut pkg = models::InstalledPackage::new(
+            pkg_ref.forge.to_string(),
+            pkg_ref.owner.clone(),
+            pkg_ref.repo.clone(),
+        );
+        pkg.version = release.tag.clone();
+        pkg.asset_filename = chosen_asset.filename.clone();
+        pkg.checksum = Some(checksum);
+        pkg.install_path = install_dir.to_string_lossy().to_string();
+        pkg.set_binary_list(bin_filenames);
+        pkg.is_managed = is_managed;
+        pkg.status = models::PackageStatus::Active;
+
+        db.upsert_package(&pkg)
+            .await
+            .with_context(|| "Failed to update package record")?;
+
+        println!(
+            "  {}",
+            format!("Installed {} v{}", pkg_ref.to_short_ref(), release.tag).green()
+        );
     }
 
     db.close().await;
     Ok(())
+}
+
+/// Present the resolved asset selection to the user, show alternatives,
+/// and return the chosen asset (or None if skipped).
+fn confirm_asset_selection(
+    sel: &grel_core::AssetSelection,
+    config: &Config,
+    noconfirm: bool,
+    _allow_keyword: bool,
+) -> Option<RemoteAsset> {
+    // In non-interactive mode, always accept the default
+    if !noconfirm && !grel_cli::is_interactive() {
+        return Some(sel.default.clone());
+    }
+
+    // Show the selected asset
+    let managed_tag = if sel.default_is_managed { "managed" } else { "unmanaged" };
+
+    if !sel.default_is_managed {
+        eprintln!(
+            "  {}",
+            format!(
+                "Warning: Asset \"{}\" requires manual installation.",
+                sel.default.filename
+            )
+            .yellow()
+        );
+        eprintln!(
+            "  {}",
+            format!(
+                "Info: Will download to {}.",
+                config.paths.download_dir.display()
+            )
+            .yellow()
+        );
+    }
+
+    println!(
+        "  Selected: {} ({}, {})",
+        sel.default.filename,
+        format_size(sel.default.size_bytes.unwrap_or(0)),
+        managed_tag,
+    );
+
+    // Show alternatives
+    if !sel.alternatives.is_empty() {
+        println!(
+            "  {}",
+            "Other compatible assets:".dimmed()
+        );
+        for (i, alt) in sel.alternatives.iter().enumerate() {
+            let alt_managed = is_asset_managed(alt, &config.assets);
+            let alt_tag = if alt_managed { "managed" } else { "unmanaged" };
+            println!(
+                "    {}) {} ({}, {})",
+                i + 2,
+                alt.filename,
+                format_size(alt.size_bytes.unwrap_or(0)),
+                alt_tag,
+            );
+        }
+    }
+
+    if noconfirm {
+        return Some(sel.default.clone());
+    }
+
+    let total_options = 1 + sel.alternatives.len();
+
+    loop {
+        let prompt = if total_options > 1 {
+            format!("Proceed with download? [1-{}, s=skip]: ", total_options)
+        } else {
+            "Proceed with download? [Y/n]: ".to_string()
+        };
+
+        print!("  {prompt}");
+        io::Write::flush(&mut io::stdout()).ok();
+
+        let mut input = String::new();
+        io::stdin().read_line(&mut input).ok();
+
+        let input = input.trim().to_lowercase();
+
+        // Empty input = accept default
+        if input.is_empty() {
+            return Some(sel.default.clone());
+        }
+
+        // Skip
+        if input == "s" || input == "skip" {
+            return None;
+        }
+
+        // Try to parse as a number
+        if let Ok(n) = input.parse::<usize>() {
+            if n == 1 {
+                return Some(sel.default.clone());
+            }
+            if n >= 2 && n <= 1 + sel.alternatives.len() {
+                let chosen = sel.alternatives[n - 2].clone();
+                // Warn if the chosen alternative is unmanaged
+                if !is_asset_managed(&chosen, &config.assets) {
+                    eprintln!(
+                        "  {}",
+                        format!(
+                            "Warning: This asset requires manual installation.",
+                        )
+                        .yellow()
+                    );
+                }
+                return Some(chosen);
+            }
+        }
+
+        // Also accept y/n for single-option case
+        if total_options == 1 {
+            if input == "y" || input == "yes" {
+                return Some(sel.default.clone());
+            }
+            if input == "n" || input == "no" {
+                return None;
+            }
+        }
+    }
 }
 
 /// Search for packages on the forge
@@ -1137,19 +1239,5 @@ fn is_asset_managed(asset: &RemoteAsset, asset_config: &grel_config::AssetConfig
 
 /// Format byte size for display
 fn format_size(bytes: u64) -> String {
-    if bytes == 0 {
-        return "unknown".into();
-    }
-    let units = ["B", "KB", "MB", "GB"];
-    let mut size = bytes as f64;
-    let mut unit_idx = 0;
-    while size >= 1024.0 && unit_idx < units.len() - 1 {
-        size /= 1024.0;
-        unit_idx += 1;
-    }
-    if unit_idx == 0 {
-        format!("{:.0} {}", size, units[unit_idx])
-    } else {
-        format!("{:.1} {}", size, units[unit_idx])
-    }
+    grel_cli::format_size(bytes)
 }
