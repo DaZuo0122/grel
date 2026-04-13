@@ -1,4 +1,19 @@
-//! Archive extraction utilities for tar.gz, zip, and plain binaries.
+//! Archive extraction and installation utilities.
+//!
+//! ## File layout for managed packages
+//! ```text
+//! <install_root>/<forge>/<owner>/<repo>/
+//! ├── <archive>           # downloaded archive (kept for checksum verification)
+//! └── <extracted tree>/   # contents of the archive
+//!
+//! <bin_dir>/
+//! ├── <binary1>           # linked or copied from extracted tree
+//! └── <binary2>
+//! ```
+//!
+//! ## Removal
+//! - Delete `<install_root>/<forge>/<owner>/<repo>/` recursively
+//! - Delete each linked binary from `<bin_dir>/`
 
 use std::path::{Path, PathBuf};
 
@@ -6,60 +21,84 @@ use sanitize_filename::sanitize;
 
 use crate::NetworkError;
 
-/// Result of an extraction operation
+/// Result of an extraction + install operation
 #[derive(Debug)]
-pub struct ExtractionResult {
-    /// Binaries found after extraction
-    pub binaries: Vec<PathBuf>,
-    /// Whether the archive was a plain binary (not an archive)
+pub struct InstallResult {
+    /// The package-specific install directory (contains archive + extracted files)
+    pub install_dir: PathBuf,
+    /// Paths of symlinks that were created in `bin_dir`
+    pub installed_binaries: Vec<PathBuf>,
+    /// Whether the asset was a plain binary (not an archive)
     pub is_plain_binary: bool,
 }
 
-/// Extract an archive to the target directory
-pub fn extract_archive(
+/// Install an asset archive into the package-managed directory.
+///
+/// 1. Creates `<install_dir>` if needed
+/// 2. Downloads/copies the archive there
+/// 3. Extracts into `<install_dir>/extracted/`
+/// 4. Detects binaries and copies/link to `bin_dir`
+/// 5. For plain binaries: just chmod +x on Unix
+pub fn install_asset(
     archive_path: &Path,
-    target_dir: &Path,
-    filename: &str,
-) -> Result<ExtractionResult, NetworkError> {
-    // Create target directory
-    std::fs::create_dir_all(target_dir).map_err(|e| {
-        NetworkError::OperationFailed(format!("Failed to create target directory: {e}"))
+    install_dir: &Path,
+    bin_dir: &Path,
+    asset_filename: &str,
+) -> Result<InstallResult, NetworkError> {
+    std::fs::create_dir_all(install_dir).map_err(|e| {
+        NetworkError::OperationFailed(format!("Failed to create install dir: {e}"))
     })?;
 
-    // Determine archive type by extension
-    if filename.ends_with(".zip") {
-        extract_zip(archive_path, target_dir)
-    } else if filename.ends_with(".tar.gz") || filename.ends_with(".tgz") {
-        extract_tar_gz(archive_path, target_dir)
-    } else if filename.ends_with(".tar.xz") {
-        extract_tar_xz(archive_path, target_dir)
-    } else if filename.ends_with(".exe") || filename.ends_with(".bin") {
-        // Plain binary - requires async for copy on Windows with tokio
-        // Use sync version for simplicity
-        std::fs::copy(archive_path, target_dir.join(filename)).map_err(|e| {
-            NetworkError::OperationFailed(format!("Failed to copy binary: {e}"))
-        })?;
-        Ok(ExtractionResult {
-            binaries: vec![target_dir.join(filename)],
-            is_plain_binary: true,
-        })
-    } else {
-        // Unsupported format - treat as plain file
-        std::fs::copy(archive_path, target_dir.join(filename)).map_err(|e| {
-            NetworkError::OperationFailed(format!("Failed to copy file: {e}"))
-        })?;
-        Ok(ExtractionResult {
-            binaries: vec![target_dir.join(filename)],
-            is_plain_binary: true,
-        })
+    let ext = extract_extension(asset_filename);
+
+    match ext {
+        ArchiveType::Zip => {
+            extract_zip(archive_path, install_dir)?;
+            link_binaries(install_dir, bin_dir, asset_filename)
+        }
+        ArchiveType::TarGz | ArchiveType::Tgz => {
+            extract_tar_gz(archive_path, install_dir)?;
+            link_binaries(install_dir, bin_dir, asset_filename)
+        }
+        ArchiveType::TarXz => {
+            extract_tar_xz(archive_path, install_dir)
+        }
+        ArchiveType::Plain => install_plain_binary(archive_path, install_dir, bin_dir, asset_filename),
     }
 }
 
-/// Extract a zip archive
-fn extract_zip(
-    archive_path: &Path,
-    target_dir: &Path,
-) -> Result<ExtractionResult, NetworkError> {
+/// Determine the archive type from filename
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ArchiveType {
+    Zip,
+    TarGz,
+    Tgz,
+    TarXz,
+    Plain,
+}
+
+fn extract_extension(filename: &str) -> ArchiveType {
+    let lower = filename.to_lowercase();
+    if lower.ends_with(".zip") {
+        ArchiveType::Zip
+    } else if lower.ends_with(".tar.gz") {
+        ArchiveType::TarGz
+    } else if lower.ends_with(".tgz") {
+        ArchiveType::Tgz
+    } else if lower.ends_with(".tar.xz") {
+        ArchiveType::TarXz
+    } else {
+        ArchiveType::Plain
+    }
+}
+
+/// Extract a zip archive into `<install_dir>/extracted/`
+fn extract_zip(archive_path: &Path, install_dir: &Path) -> Result<(), NetworkError> {
+    let out_dir = install_dir.join("extracted");
+    std::fs::create_dir_all(&out_dir).map_err(|e| {
+        NetworkError::OperationFailed(format!("Failed to create extract dir: {e}"))
+    })?;
+
     let archive_file = std::fs::File::open(archive_path).map_err(|e| {
         NetworkError::OperationFailed(format!("Failed to open archive: {e}"))
     })?;
@@ -68,28 +107,25 @@ fn extract_zip(
         NetworkError::OperationFailed(format!("Invalid zip archive: {e}"))
     })?;
 
-    let mut binaries = Vec::new();
-
     for i in 0..archive.len() {
         let mut file = archive.by_index(i).map_err(|e| {
             NetworkError::OperationFailed(format!("Failed to read archive entry: {e}"))
         })?;
 
         let raw_name = file.name().to_string();
-        let sanitized = sanitize(&raw_name);
+        let sanitized = sanitize_path_components(&raw_name)?;
 
         if sanitized.is_empty() || sanitized.contains("..") {
-            continue; // Skip suspicious paths
+            continue;
         }
 
-        let out_path = target_dir.join(&sanitized);
+        let out_path = out_dir.join(&sanitized);
 
         if file.is_dir() {
             std::fs::create_dir_all(&out_path).map_err(|e| {
                 NetworkError::OperationFailed(format!("Failed to create directory: {e}"))
             })?;
         } else {
-            // Ensure parent directory exists
             if let Some(parent) = out_path.parent() {
                 std::fs::create_dir_all(parent).map_err(|e| {
                     NetworkError::OperationFailed(format!("Failed to create directory: {e}"))
@@ -103,25 +139,19 @@ fn extract_zip(
             std::io::copy(&mut file, &mut out_file).map_err(|e| {
                 NetworkError::OperationFailed(format!("Failed to extract file: {e}"))
             })?;
-
-            // Check if it's a binary
-            if is_likely_binary(&sanitized) {
-                binaries.push(out_path);
-            }
         }
     }
 
-    Ok(ExtractionResult {
-        binaries,
-        is_plain_binary: false,
-    })
+    Ok(())
 }
 
-/// Extract a tar.gz archive
-fn extract_tar_gz(
-    archive_path: &Path,
-    target_dir: &Path,
-) -> Result<ExtractionResult, NetworkError> {
+/// Extract a tar.gz archive into `<install_dir>/extracted/`
+fn extract_tar_gz(archive_path: &Path, install_dir: &Path) -> Result<(), NetworkError> {
+    let out_dir = install_dir.join("extracted");
+    std::fs::create_dir_all(&out_dir).map_err(|e| {
+        NetworkError::OperationFailed(format!("Failed to create extract dir: {e}"))
+    })?;
+
     let tar_gz_file = std::fs::File::open(archive_path).map_err(|e| {
         NetworkError::OperationFailed(format!("Failed to open archive: {e}"))
     })?;
@@ -129,9 +159,6 @@ fn extract_tar_gz(
     let decoder = flate2::read::GzDecoder::new(tar_gz_file);
     let mut archive = tar::Archive::new(decoder);
 
-    let mut binaries = Vec::new();
-
-    // SAFETY: We validate all paths before extracting
     let entries = archive.entries().map_err(|e| {
         NetworkError::OperationFailed(format!("Invalid tar archive: {e}"))
     })?;
@@ -143,11 +170,15 @@ fn extract_tar_gz(
 
         let path = entry.path().map_err(|e| {
             NetworkError::OperationFailed(format!("Invalid path in archive: {e}"))
-        })?.to_path_buf();
+        })?
+        .to_path_buf();
 
-        // Sanitize and validate path
-        let safe_path = sanitize_tar_path(&path, target_dir)?;
-        let full_path = target_dir.join(&safe_path);
+        let safe_path = sanitize_tar_path(&path)?;
+        if safe_path.is_empty() || safe_path.contains("..") {
+            continue;
+        }
+
+        let full_path = out_dir.join(&safe_path);
 
         if entry.header().entry_type().is_dir() {
             std::fs::create_dir_all(&full_path).map_err(|e| {
@@ -163,90 +194,261 @@ fn extract_tar_gz(
             entry.unpack(&full_path).map_err(|e| {
                 NetworkError::OperationFailed(format!("Failed to extract file: {e}"))
             })?;
-
-            let filename = safe_path
-                .file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_default();
-
-            if is_likely_binary(&filename) {
-                binaries.push(full_path);
-            }
         }
     }
 
-    Ok(ExtractionResult {
-        binaries,
-        is_plain_binary: false,
-    })
+    Ok(())
 }
 
-/// Extract a tar.xz archive
-fn extract_tar_xz(
-    _archive_path: &Path,
-    _target_dir: &Path,
-) -> Result<ExtractionResult, NetworkError> {
-    // TODO: Implement with xz2 crate
+/// Extract tar.xz (stub)
+fn extract_tar_xz(_archive_path: &Path, _install_dir: &Path) -> Result<InstallResult, NetworkError> {
     Err(NetworkError::OperationFailed(
         "tar.xz extraction not yet implemented".into(),
     ))
 }
 
-/// Check if a filename is likely a binary executable
-fn is_likely_binary(filename: &str) -> bool {
-    let lower = filename.to_lowercase();
-    // Executable extensions
+/// Install a plain binary (not an archive)
+fn install_plain_binary(
+    source_path: &Path,
+    install_dir: &Path,
+    bin_dir: &Path,
+    filename: &str,
+) -> Result<InstallResult, NetworkError> {
+    // Copy archive to install dir
+    let dest = install_dir.join(filename);
+    std::fs::copy(source_path, &dest).map_err(|e| {
+        NetworkError::OperationFailed(format!("Failed to copy binary: {e}"))
+    })?;
+
+    // Symlink from bin_dir to the actual binary (so it can find sibling DLLs)
+    let link_path = bin_dir.join(filename);
+    create_binary_link(&dest, &link_path)?;
+
+    // Make target executable on Unix (for the actual binary in install_dir)
+    make_executable(&dest)?;
+
+    Ok(InstallResult {
+        install_dir: install_dir.to_path_buf(),
+        installed_binaries: vec![link_path],
+        is_plain_binary: true,
+    })
+}
+
+/// Detect binaries in extracted tree and symlink them to bin_dir
+fn link_binaries(
+    install_dir: &Path,
+    bin_dir: &Path,
+    _archive_name: &str,
+) -> Result<InstallResult, NetworkError> {
+    let extracted = install_dir.join("extracted");
+    let mut installed = Vec::new();
+
+    if extracted.exists() {
+        collect_binaries(&extracted, bin_dir, &mut installed)?;
+    }
+
+    // If no binaries found in extracted/, check if the archive contained
+    // a single top-level binary (common for Go releases)
+    if installed.is_empty() {
+        for entry in std::fs::read_dir(install_dir).map_err(|e| {
+            NetworkError::OperationFailed(format!("Failed to read install dir: {e}"))
+        })? {
+            let entry = entry.map_err(|e| {
+                NetworkError::OperationFailed(format!("Failed to read dir entry: {e}"))
+            })?;
+            let path = entry.path();
+            if path.is_file() && is_executable_name(&path) {
+                let dest = bin_dir.join(path.file_name().unwrap());
+                create_binary_link(&path, &dest)?;
+                installed.push(dest);
+            }
+        }
+    }
+
+    Ok(InstallResult {
+        install_dir: install_dir.to_path_buf(),
+        installed_binaries: installed,
+        is_plain_binary: false,
+    })
+}
+
+/// Recursively find executable files in a directory tree and symlink to bin_dir
+fn collect_binaries(
+    dir: &Path,
+    bin_dir: &Path,
+    installed: &mut Vec<PathBuf>,
+) -> Result<(), NetworkError> {
+    for entry in std::fs::read_dir(dir).map_err(|e| {
+        NetworkError::OperationFailed(format!("Failed to read directory: {e}"))
+    })? {
+        let entry = entry.map_err(|e| {
+            NetworkError::OperationFailed(format!("Failed to read dir entry: {e}"))
+        })?;
+        let path = entry.path();
+
+        if path.is_dir() {
+            collect_binaries(&path, bin_dir, installed)?;
+        } else if path.is_file() && is_executable_name(&path) {
+            let dest = bin_dir.join(path.file_name().unwrap());
+            create_binary_link(&path, &dest)?;
+            installed.push(dest);
+        }
+    }
+    Ok(())
+}
+
+/// Create a symlink from `dest` → `target`, falling back to a copy if
+/// symlink creation fails (e.g. unprivileged Windows without dev mode).
+///
+/// This is preferred over copying because some executables depend on
+/// sibling DLLs/SOs that remain in the extracted tree.
+fn create_binary_link(target: &Path, dest: &Path) -> Result<(), NetworkError> {
+    // Try symlink first
+    if symlink_binary(target, dest).is_ok() {
+        return Ok(());
+    }
+
+    // Fall back to hard link (faster, same volume required)
+    if std::fs::hard_link(target, dest).is_ok() {
+        return Ok(());
+    }
+
+    // Final fallback: copy
+    std::fs::copy(target, dest).map_err(|e| {
+        NetworkError::OperationFailed(format!(
+            "Failed to install binary '{}' (symlink/hardlink/copy all failed): {e}",
+            target.display()
+        ))
+    })?;
+
+    Ok(())
+}
+
+/// Platform-specific symlink creation
+fn symlink_binary(target: &Path, dest: &Path) -> Result<(), std::io::Error> {
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(target, dest)
+    }
+    #[cfg(windows)]
+    {
+        std::os::windows::fs::symlink_file(target, dest)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = (target, dest);
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "Symlinks not supported on this platform",
+        ))
+    }
+}
+
+/// Check if a filename looks like an executable
+fn is_executable_name(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+        return false;
+    };
+    let lower = name.to_lowercase();
+
+    // Known executable extensions
     if lower.ends_with(".exe")
         || lower.ends_with(".bat")
         || lower.ends_with(".cmd")
         || lower.ends_with(".ps1")
+        || lower.ends_with(".com")
         || lower.ends_with(".bin")
-        || lower.ends_with(".appimage")
     {
         return true;
     }
 
-    // Heuristic: if no extension and not a known text type, likely a binary
-    if !lower.contains('.') {
-        let text_extensions = ["md", "txt", "rst", "json", "yaml", "yml", "toml", "cfg", "conf", "sh", "bash"];
-        return !text_extensions.iter().any(|ext| lower.ends_with(ext));
+    // No extension: likely a Unix binary
+    if !name.contains('.') {
+        let skip = ["readme", "license", "changelog", "changes", "copying"];
+        return !skip.iter().any(|&s| lower.starts_with(s));
     }
 
     false
 }
 
-/// Sanitize a tar archive entry path to prevent path traversal attacks
-fn sanitize_tar_path(
-    entry_path: &Path,
-    _target_dir: &Path,
-) -> Result<PathBuf, NetworkError> {
-    // Reject absolute paths
-    if entry_path.is_absolute() || entry_path.starts_with("/") {
-        return Err(NetworkError::OperationFailed(
-            "Absolute path in archive".into(),
-        ));
+/// Add execute permission on Unix
+fn make_executable(path: &Path) -> Result<(), NetworkError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let meta = std::fs::metadata(path).map_err(|e| {
+            NetworkError::OperationFailed(format!("Failed to read metadata: {e}"))
+        })?;
+        let mut perms = meta.permissions();
+        perms.set_mode(perms.mode() | 0o111);
+        std::fs::set_permissions(path, perms).map_err(|e| {
+            NetworkError::OperationFailed(format!("Failed to set permissions: {e}"))
+        })?;
+    }
+    let _ = path; // suppress unused warning on Windows
+    Ok(())
+}
+
+/// Sanitize a path, rejecting dangerous patterns
+fn sanitize_path_components(path: &str) -> Result<String, NetworkError> {
+    let path = Path::new(path);
+    let mut result = PathBuf::new();
+
+    for component in path.components() {
+        match component {
+            std::path::Component::Normal(name) => {
+                let sanitized = sanitize(&name.to_string_lossy());
+                if sanitized.is_empty() {
+                    return Err(NetworkError::OperationFailed(
+                        "Empty path component after sanitization".into(),
+                    ));
+                }
+                result.push(sanitized);
+            }
+            std::path::Component::ParentDir => {
+                return Err(NetworkError::OperationFailed(
+                    "Path traversal detected in archive".into(),
+                ));
+            }
+            std::path::Component::RootDir | std::path::Component::Prefix(_) => {
+                return Err(NetworkError::OperationFailed(
+                    "Absolute path in archive".into(),
+                ));
+            }
+            std::path::Component::CurDir => {} // skip "."
+        }
     }
 
-    // Reject paths with ..
+    Ok(result.to_string_lossy().to_string())
+}
+
+/// Sanitize a tar archive entry path
+fn sanitize_tar_path(entry_path: &Path) -> Result<String, NetworkError> {
+    let mut result = PathBuf::new();
+
     for component in entry_path.components() {
-        if let std::path::Component::ParentDir = component {
-            return Err(NetworkError::OperationFailed(
-                "Path traversal detected in archive".into(),
-            ));
+        match component {
+            std::path::Component::Normal(name) => {
+                let sanitized = sanitize(&name.to_string_lossy());
+                if !sanitized.is_empty() {
+                    result.push(sanitized);
+                }
+            }
+            std::path::Component::ParentDir => {
+                return Err(NetworkError::OperationFailed(
+                    "Path traversal detected in archive".into(),
+                ));
+            }
+            std::path::Component::RootDir | std::path::Component::Prefix(_) => {
+                return Err(NetworkError::OperationFailed(
+                    "Absolute path in archive".into(),
+                ));
+            }
+            std::path::Component::CurDir => {} // skip "."
         }
     }
 
-    // Sanitize the filename
-    if let Some(file_name) = entry_path.file_name() {
-        let sanitized = sanitize(&file_name.to_string_lossy());
-        if let Some(parent) = entry_path.parent() {
-            Ok(parent.join(sanitized))
-        } else {
-            Ok(PathBuf::from(sanitized))
-        }
-    } else {
-        Ok(entry_path.to_path_buf())
-    }
+    Ok(result.to_string_lossy().to_string())
 }
 
 #[cfg(test)]
@@ -254,19 +456,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_is_likely_binary() {
-        assert!(is_likely_binary("tool.exe"));
-        assert!(is_likely_binary("script.bat"));
-        assert!(is_likely_binary("tool")); // No extension, likely binary on Unix
-        assert!(!is_likely_binary("readme.md"));
-        assert!(!is_likely_binary("config.json"));
+    fn test_is_executable_name() {
+        assert!(is_executable_name(Path::new("tool.exe")));
+        assert!(is_executable_name(Path::new("script.bat")));
+        assert!(is_executable_name(Path::new("rg")));
+        assert!(!is_executable_name(Path::new("readme.md")));
+        assert!(!is_executable_name(Path::new("config.json")));
     }
 
     #[test]
     fn test_path_traversal_rejected() {
-        let target = PathBuf::from("/tmp/test");
-        assert!(sanitize_tar_path(Path::new("../evil.txt"), &target).is_err());
-        assert!(sanitize_tar_path(Path::new("/etc/passwd"), &target).is_err());
-        assert!(sanitize_tar_path(Path::new("safe/file.txt"), &target).is_ok());
+        assert!(sanitize_path_components("../evil.txt").is_err());
+        assert!(sanitize_path_components("/etc/passwd").is_err());
+        assert!(sanitize_path_components("safe/file.txt").is_ok());
     }
 }

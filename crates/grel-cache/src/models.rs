@@ -31,7 +31,14 @@ impl PackageStatus {
     }
 }
 
-/// Represents an installed package in the database
+/// Represents an installed package in the database.
+///
+/// ## File layout
+/// - **Managed packages**: archive + extracted files live under
+///   `<install_root>/<forge>/<owner>/<repo>/`. Binaries are linked or
+///   copied into `bin_dir/`.
+/// - **Unmanaged packages**: the downloaded file lives in `download_dir/`
+///   and `install_path` points to it directly.
 #[derive(Debug, Clone)]
 pub struct InstalledPackage {
     pub id: Option<i64>,
@@ -41,7 +48,13 @@ pub struct InstalledPackage {
     pub version: String,
     pub asset_filename: String,
     pub checksum: Option<String>,
+    /// For managed packages: `<install_root>/<forge>/<owner>/<repo>/`
+    /// (the directory containing the downloaded archive + extracted tree).
+    /// For unmanaged: the full path to the downloaded file.
     pub install_path: String,
+    /// Binary filenames that were installed into `bin_dir/`.
+    /// Stored as a semicolon-separated list for simplicity.
+    pub installed_binaries: String,
     pub is_managed: bool,
     pub status: PackageStatus,
     pub orphaned_at: Option<i64>,
@@ -61,6 +74,7 @@ impl InstalledPackage {
             asset_filename: String::new(),
             checksum: None,
             install_path: String::new(),
+            installed_binaries: String::new(),
             is_managed: true,
             status: PackageStatus::Active,
             orphaned_at: None,
@@ -72,6 +86,23 @@ impl InstalledPackage {
     /// Get the full package reference string
     pub fn package_ref(&self) -> String {
         format!("{}/{}/{}", self.forge, self.owner, self.repo)
+    }
+
+    /// List of installed binary filenames (split from semicolon-separated string)
+    pub fn binary_list(&self) -> Vec<String> {
+        if self.installed_binaries.is_empty() {
+            return vec![];
+        }
+        self.installed_binaries
+            .split(';')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect()
+    }
+
+    /// Set the list of installed binary filenames
+    pub fn set_binary_list(&mut self, binaries: Vec<String>) {
+        self.installed_binaries = binaries.join(";");
     }
 }
 

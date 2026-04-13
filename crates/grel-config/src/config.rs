@@ -8,7 +8,7 @@ use figment::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::paths::resolve_path;
+use crate::paths::{default_bin_dir, default_install_root};
 
 /// Schema version for the configuration
 pub const CONFIG_SCHEMA_VERSION: u32 = 1;
@@ -61,6 +61,10 @@ pub struct GeneralConfig {
     /// Proxy setting (empty = auto-detect)
     #[serde(default)]
     pub proxy: String,
+
+    /// Keep downloaded archives after extraction (default: true)
+    #[serde(default = "default_keep_archives")]
+    pub keep_archives: bool,
 }
 
 impl Default for GeneralConfig {
@@ -69,6 +73,7 @@ impl Default for GeneralConfig {
             version: default_schema_version(),
             max_concurrent: default_max_concurrent(),
             proxy: String::new(),
+            keep_archives: default_keep_archives(),
         }
     }
 }
@@ -79,6 +84,10 @@ fn default_schema_version() -> u32 {
 
 fn default_max_concurrent() -> usize {
     DEFAULT_MAX_CONCURRENT
+}
+
+fn default_keep_archives() -> bool {
+    true
 }
 
 /// Asset resolution settings
@@ -198,11 +207,11 @@ impl Default for PathConfig {
 }
 
 fn install_root_default() -> PathBuf {
-    resolve_path("~/.local/share/grel")
+    default_install_root()
 }
 
 fn bin_dir_default() -> PathBuf {
-    resolve_path("~/.local/share/grel/bin")
+    default_bin_dir()
 }
 
 fn download_dir_default() -> PathBuf {

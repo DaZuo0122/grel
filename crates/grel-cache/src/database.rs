@@ -16,10 +16,27 @@ impl Database {
     pub async fn init(db_path: &Path) -> Result<Self, DatabaseError> {
         // Ensure parent directory exists
         if let Some(parent) = db_path.parent() {
-            tokio::fs::create_dir_all(parent).await?;
+            tokio::fs::create_dir_all(parent).await.map_err(|e| {
+                DatabaseError::IoError(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    format!("Failed to create directory '{}': {e}", parent.display()),
+                ))
+            })?;
         }
 
-        let db_url = format!("sqlite:{}", db_path.display());
+        // Build SQLite URL. SQLite on Windows requires the `file:` URI format
+        // with three slashes for absolute paths: `sqlite:///C:/path/to/db`.
+        // The `?mode=rwc` flag ensures the database is created if it doesn't exist.
+        let db_path_str = db_path
+            .to_string_lossy()
+            .replace('\\', "/");
+        let db_url = if cfg!(windows) {
+            format!("sqlite:///{db_path_str}?mode=rwc")
+        } else if db_path_str.starts_with('/') {
+            format!("sqlite://{db_path_str}?mode=rwc")
+        } else {
+            format!("sqlite:{db_path_str}?mode=rwc")
+        };
         let pool = SqlitePool::connect(&db_url).await?;
 
         // Run migrations
@@ -41,6 +58,7 @@ impl Database {
                 asset_filename TEXT NOT NULL,
                 checksum TEXT,
                 install_path TEXT NOT NULL,
+                installed_binaries TEXT NOT NULL DEFAULT '',
                 is_managed BOOLEAN NOT NULL DEFAULT 1,
                 status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'orphaned', 'migrated')),
                 orphaned_at INTEGER,
@@ -51,6 +69,15 @@ impl Database {
         )
         .execute(pool)
         .await?;
+
+        // Add column if it doesn't exist (idempotent migration)
+        // We ignore errors since the column may already exist
+        sqlx::query(
+            r#"ALTER TABLE installed ADD COLUMN installed_binaries TEXT NOT NULL DEFAULT ''"#,
+        )
+        .execute(pool)
+        .await
+        .ok();
 
         sqlx::query(
             r#"
@@ -105,15 +132,16 @@ impl Database {
     pub async fn upsert_package(&self, pkg: &InstalledPackage) -> Result<(), DatabaseError> {
         sqlx::query(
             r#"
-            INSERT INTO installed 
-                (forge, owner, repo, version, asset_filename, checksum, install_path, 
-                 is_managed, status, orphaned_at, last_checked)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO installed
+                (forge, owner, repo, version, asset_filename, checksum, install_path,
+                 installed_binaries, is_managed, status, orphaned_at, last_checked)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(forge, owner, repo) DO UPDATE SET
                 version = excluded.version,
                 asset_filename = excluded.asset_filename,
                 checksum = excluded.checksum,
                 install_path = excluded.install_path,
+                installed_binaries = excluded.installed_binaries,
                 is_managed = excluded.is_managed,
                 status = excluded.status,
                 orphaned_at = excluded.orphaned_at,
@@ -127,6 +155,7 @@ impl Database {
         .bind(&pkg.asset_filename)
         .bind(&pkg.checksum)
         .bind(&pkg.install_path)
+        .bind(&pkg.installed_binaries)
         .bind(pkg.is_managed)
         .bind(pkg.status.to_string())
         .bind(pkg.orphaned_at)
@@ -146,8 +175,8 @@ impl Database {
     ) -> Result<Option<InstalledPackage>, DatabaseError> {
         let row = sqlx::query(
             r#"
-            SELECT id, forge, owner, repo, version, asset_filename, checksum, 
-                   install_path, is_managed, status, orphaned_at, last_checked, installed_at
+            SELECT id, forge, owner, repo, version, asset_filename, checksum,
+                   install_path, installed_binaries, is_managed, status, orphaned_at, last_checked, installed_at
             FROM installed
             WHERE forge = ? AND owner = ? AND repo = ?
             "#,
@@ -165,8 +194,8 @@ impl Database {
     pub async fn list_packages(&self) -> Result<Vec<InstalledPackage>, DatabaseError> {
         let rows = sqlx::query(
             r#"
-            SELECT id, forge, owner, repo, version, asset_filename, checksum, 
-                   install_path, is_managed, status, orphaned_at, last_checked, installed_at
+            SELECT id, forge, owner, repo, version, asset_filename, checksum,
+                   install_path, installed_binaries, is_managed, status, orphaned_at, last_checked, installed_at
             FROM installed
             ORDER BY forge, owner, repo
             "#,
@@ -246,6 +275,7 @@ impl Database {
             asset_filename: row.get("asset_filename"),
             checksum: row.get("checksum"),
             install_path: row.get("install_path"),
+            installed_binaries: row.get("installed_binaries"),
             is_managed: row.get("is_managed"),
             status: PackageStatus::from_str(&row.get::<String, _>("status")),
             orphaned_at: row.get("orphaned_at"),

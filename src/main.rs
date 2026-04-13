@@ -283,12 +283,16 @@ async fn cmd_sync(
                     }
                 }
 
-                // Determine download destination
-                let dest_path = if is_managed {
-                    config.paths.bin_dir.join(&asset.filename)
+                // Determine paths
+                let install_dir = if is_managed {
+                    config.paths.install_root.join(format!(
+                        "{}/{}/{}",
+                        pkg_ref.forge, pkg_ref.owner, pkg_ref.repo
+                    ))
                 } else {
-                    config.paths.download_dir.join(&asset.filename)
+                    config.paths.download_dir.clone()
                 };
+                let archive_path = install_dir.join(&asset.filename);
 
                 println!(
                     "  Downloading: {} ({})",
@@ -301,53 +305,70 @@ async fn cmd_sync(
                     continue;
                 }
 
+                // Ensure destination exists
+                std::fs::create_dir_all(&install_dir).map_err(|e| {
+                    anyhow::anyhow!("Failed to create directory '{}': {e}", install_dir.display())
+                })?;
+
                 // Download the asset
                 let checksum = grel_network::download::download_file(
                     &client,
                     &asset.url,
-                    &dest_path,
+                    &archive_path,
                     None,
                 )
                 .await
                 .with_context(|| format!("Failed to download {}", asset.filename))?;
 
                 // If managed, extract and install
-                if is_managed {
-                    let extract_result = grel_network::archive::extract_archive(
-                        &dest_path,
+                let installed_binaries = if is_managed {
+                    match grel_network::archive::install_asset(
+                        &archive_path,
+                        &install_dir,
                         &config.paths.bin_dir,
                         &asset.filename,
-                    );
-
-                    match extract_result {
+                    ) {
                         Ok(result) => {
-                            if !result.binaries.is_empty() {
+                            if !result.installed_binaries.is_empty() {
                                 println!(
                                     "  {}",
-                                    format!("Extracted {} binary(s)", result.binaries.len()).green()
+                                    format!(
+                                        "Installed {} binary(s) to {}",
+                                        result.installed_binaries.len(),
+                                        config.paths.bin_dir.display()
+                                    )
+                                    .green()
                                 );
                             } else if result.is_plain_binary {
-                                #[cfg(unix)]
-                                {
-                                    use std::os::unix::fs::PermissionsExt;
-                                    if let Ok(mut perms) = std::fs::metadata(&dest_path)
-                                        .map(|m| m.permissions())
-                                    {
-                                        let mut p = perms;
-                                        p.set_mode(0o755);
-                                        std::fs::set_permissions(&dest_path, p).ok();
-                                    }
-                                }
                                 println!("  {}", "Installed binary".green());
                             }
+                            result.installed_binaries
                         }
                         Err(e) => {
                             eprintln!(
                                 "  {}",
                                 format!("Warning: Failed to extract: {e}").yellow()
                             );
+                            vec![]
                         }
                     }
+                } else {
+                    vec![]
+                };
+
+                // Convert binary paths to filenames for DB tracking
+                let bin_filenames: Vec<String> = installed_binaries
+                    .iter()
+                    .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
+                    .collect();
+
+                // Optionally clean up the downloaded archive
+                if is_managed && !config.general.keep_archives && archive_path.exists() {
+                    std::fs::remove_file(&archive_path).ok();
+                    println!(
+                        "  {}",
+                        "Cleaned up downloaded archive".dimmed()
+                    );
                 }
 
                 // Update database
@@ -359,7 +380,8 @@ async fn cmd_sync(
                 pkg.version = release.tag.clone();
                 pkg.asset_filename = asset.filename.clone();
                 pkg.checksum = Some(checksum);
-                pkg.install_path = dest_path.to_string_lossy().to_string();
+                pkg.install_path = install_dir.to_string_lossy().to_string();
+                pkg.set_binary_list(bin_filenames);
                 pkg.is_managed = is_managed;
                 pkg.status = models::PackageStatus::Active;
 
@@ -448,7 +470,7 @@ async fn cmd_search(
 }
 
 /// Sync package database (refresh only)
-async fn cmd_sync_refresh(config: &Config, default_forge: Forge) -> Result<()> {
+async fn cmd_sync_refresh(config: &Config, _default_forge: Forge) -> Result<()> {
     println!("{}", "Synchronizing package database...".bold());
 
     let db_path = config.paths.install_root.join("state.sqlite");
@@ -717,7 +739,7 @@ async fn cmd_info_local(config: &Config, pkg_ref_str: String) -> Result<()> {
     Ok(())
 }
 
-async fn cmd_info_remote(config: &Config, pkg_ref_str: String, default_forge: Forge) -> Result<()> {
+async fn cmd_info_remote(_config: &Config, pkg_ref_str: String, default_forge: Forge) -> Result<()> {
     let pkg_ref = PackageRef::parse_with_forge(&pkg_ref_str, default_forge)
         .with_context(|| format!("Invalid package reference: {pkg_ref_str}"))?;
 
@@ -837,17 +859,36 @@ async fn cmd_remove(
             }
         }
 
+        let id = pkg.id.expect("Package must have an ID");
+
         if cli.dry_run {
-            println!("  {}", format!("(dry-run: would remove {})", pkg.package_ref()).yellow());
+            println!(
+                "  {}",
+                format!("(dry-run: would remove {})", pkg.package_ref()).yellow()
+            );
+            println!("    install dir: {}", pkg.install_path);
+            for bin in pkg.binary_list() {
+                println!("    binary: {}", config.paths.bin_dir.join(&bin).display());
+            }
             continue;
         }
 
-        let id = pkg.id.expect("Package must have an ID");
+        // Delete binaries from bin_dir
+        for bin_name in pkg.binary_list() {
+            let bin_path = config.paths.bin_dir.join(&bin_name);
+            if bin_path.exists() {
+                std::fs::remove_file(&bin_path).ok();
+            }
+        }
 
-        // Remove installed files
+        // Delete the entire install directory
         let install_path = std::path::Path::new(&pkg.install_path);
         if install_path.exists() {
-            std::fs::remove_file(install_path).ok();
+            if install_path.is_dir() {
+                std::fs::remove_dir_all(install_path).ok();
+            } else {
+                std::fs::remove_file(install_path).ok();
+            }
         }
 
         db.remove_package(id).await?;

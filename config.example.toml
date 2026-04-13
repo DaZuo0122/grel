@@ -5,6 +5,7 @@
 version = 1                      # Schema version (do not modify)
 max_concurrent = 4               # Parallel downloads (0 = auto CPU/2, min 2)
 proxy = ""                       # Empty = auto-detect $http_proxy/$all_proxy
+keep_archives = true             # Keep downloaded archives after extraction
 
 [assets]
 default_selection_policy = "first"  # "first" | "largest" (only breaks ties after strict filtering)
