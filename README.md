@@ -19,21 +19,21 @@
 ### From Source
 
 ```bash
-git clone https://github.com/grel-rs/grel-rs.git
-cd grel-rs
+git clone https://github.com/DaZuo0122/grel.git
+cd grel
 cargo install --path .
 ```
 
 ### Pre-built Binaries
 
-Download from [Releases](https://github.com/grel-rs/grel-rs/releases):
+Download from [Releases](https://github.com/DaZuo0122/grel/releases):
 
 ```bash
 # Linux
-grel sync github/grel-rs/grel-rs
+grel sync github/DaZuo0122/grel
 
 # Windows (PowerShell)
-grel.exe sync github/grel-rs/grel-rs
+grel.exe sync github/DaZuo0122/grel
 ```
 
 ## Quick Start
@@ -58,24 +58,33 @@ Configuration is stored in `~/.config/grel/config.toml` (Linux) or `%APPDATA%\gr
 
 ```toml
 [general]
-max_concurrent = 4
-proxy = ""
+version = 1                      # Schema version (do not modify)
+max_concurrent = 4               # Parallel downloads (0 = auto CPU/2, min 2)
+proxy = ""                       # Empty = auto-detect $http_proxy/$all_proxy
+keep_archives = true             # Keep downloaded archives after extraction
 
 [assets]
-default_selection_policy = "first"
+default_selection_policy = "first"  # "first" | "largest" (only breaks ties after strict filtering)
 exclude_keywords = ["setup", "installer", "bundle", "nupkg"]
-ignore_formats = ["*.deb", "*.rpm", "*.msi", "*.dmg"]
+ignore_formats = ["*.deb", "*.rpm", "*.msi", "*.dmg", "*.pkg", "*.AppImage"]
 prefer_formats = ["*.tar.gz", "*.tar.xz", "*.zip", "*.exe"]
-fallback_to_32bit = true
+prefer_32bit_on_64bit = false    # Prefers 32-bit assets ONLY when running on 64-bit OS
+fallback_to_32bit = true         # Allows 32-bit install if NO 64-bit asset exists
+prefer_musl = false              # Linux-only: prefers musl over gnu builds
 
 [paths]
-install_root = "~/.local/share/grel"
-bin_dir = "~/.local/share/grel/bin"
-download_dir = "~/Downloads"
+install_root = "~/.local/share/grel"  # Managed package storage
+bin_dir = "~/.local/share/grel/bin"   # Extracted binaries (added to $PATH)
+download_dir = "~/Downloads"          # Unmanaged/extra-op packages (falls back to system Downloads/)
 
 [upgrade]
-check_interval_hours = 6
-max_parallel_checks = 10
+check_interval_hours = 6         # Remote check cooldown per package
+max_parallel_checks = 10         # Concurrent API requests during `-Syu`
+
+[auth]
+github_token = ""                # Use env $GREL_GITHUB_TOKEN instead
+gitlab_token = ""                # Use env $GREL_GITLAB_TOKEN instead
+gitea_token = ""                 # Use env $GREL_GITEA_TOKEN instead
 ```
 
 ## Usage
