@@ -1,0 +1,30 @@
+[package]
+name = "grel-network"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "HTTP client, proxy management, and parallel downloads for grel"
+
+[dependencies]
+grel-core = { path = "../grel-core" }
+grel-cache = { path = "../grel-cache" }
+grel-config = { path = "../grel-config" }
+
+reqwest.workspace = true
+tokio.workspace = true
+futures.workspace = true
+hickory-resolver.workspace = true
+dashmap.workspace = true
+tracing.workspace = true
+indicatif.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+url.workspace = true
+zip.workspace = true
+tar.workspace = true
+sanitize-filename.workspace = true
+flate2 = "1"
+
+[lints]
+workspace = true

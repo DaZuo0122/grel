@@ -1,0 +1,19 @@
+[package]
+name = "grel-config"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Configuration management for grel"
+
+[dependencies]
+figment.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+directories.workspace = true
+dirs = "5"
+regex.workspace = true
+tracing.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,26 @@
+[package]
+name = "grel-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "CLI parsing and user interaction for grel"
+
+[dependencies]
+grel-core = { path = "../grel-core" }
+grel-config = { path = "../grel-config" }
+grel-cache = { path = "../grel-cache" }
+grel-network = { path = "../grel-network" }
+grel-providers = { path = "../grel-providers" }
+
+clap.workspace = true
+indicatif.workspace = true
+tracing-indicatif.workspace = true
+tabled.workspace = true
+owo-colors.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+anyhow.workspace = true
+
+[lints]
+workspace = true

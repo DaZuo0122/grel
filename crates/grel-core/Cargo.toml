@@ -1,0 +1,16 @@
+[package]
+name = "grel-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Core resolution logic and asset tokenization for grel"
+
+[dependencies]
+serde.workspace = true
+regex.workspace = true
+thiserror.workspace = true
+semver.workspace = true
+
+[lints]
+workspace = true

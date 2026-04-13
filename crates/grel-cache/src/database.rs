@@ -1,0 +1,307 @@
+//! SQLite database management.
+
+use std::path::Path;
+
+use sqlx::{SqlitePool, Row};
+
+use crate::models::{InstalledPackage, PackageStatus};
+
+/// Database connection wrapper
+pub struct Database {
+    pool: SqlitePool,
+}
+
+impl Database {
+    /// Initialize the database and run migrations
+    pub async fn init(db_path: &Path) -> Result<Self, DatabaseError> {
+        // Ensure parent directory exists
+        if let Some(parent) = db_path.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+
+        let db_url = format!("sqlite:{}", db_path.display());
+        let pool = SqlitePool::connect(&db_url).await?;
+
+        // Run migrations
+        Self::run_migrations(&pool).await?;
+
+        Ok(Self { pool })
+    }
+
+    /// Run database schema migrations
+    async fn run_migrations(pool: &SqlitePool) -> Result<(), DatabaseError> {
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS installed (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                forge TEXT NOT NULL,
+                owner TEXT NOT NULL,
+                repo TEXT NOT NULL,
+                version TEXT NOT NULL,
+                asset_filename TEXT NOT NULL,
+                checksum TEXT,
+                install_path TEXT NOT NULL,
+                is_managed BOOLEAN NOT NULL DEFAULT 1,
+                status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'orphaned', 'migrated')),
+                orphaned_at INTEGER,
+                last_checked INTEGER,
+                installed_at INTEGER DEFAULT (strftime('%s', 'now'))
+            )
+            "#,
+        )
+        .execute(pool)
+        .await?;
+
+        sqlx::query(
+            r#"
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_pkg_unique 
+            ON installed(forge, owner, repo)
+            "#,
+        )
+        .execute(pool)
+        .await?;
+
+        sqlx::query(
+            r#"
+            CREATE INDEX IF NOT EXISTS idx_status 
+            ON installed(status)
+            "#,
+        )
+        .execute(pool)
+        .await?;
+
+        // Create ETag cache table
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS etag_cache (
+                url TEXT PRIMARY KEY,
+                etag TEXT NOT NULL,
+                last_modified INTEGER NOT NULL
+            )
+            "#,
+        )
+        .execute(pool)
+        .await?;
+
+        // Create DNS cache table
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS dns_cache (
+                hostname TEXT NOT NULL,
+                ip_address TEXT NOT NULL,
+                rtt_ms INTEGER NOT NULL,
+                expires_at INTEGER NOT NULL,
+                PRIMARY KEY (hostname, ip_address)
+            )
+            "#,
+        )
+        .execute(pool)
+        .await?;
+
+        Ok(())
+    }
+
+    /// Insert or update a package record
+    pub async fn upsert_package(&self, pkg: &InstalledPackage) -> Result<(), DatabaseError> {
+        sqlx::query(
+            r#"
+            INSERT INTO installed 
+                (forge, owner, repo, version, asset_filename, checksum, install_path, 
+                 is_managed, status, orphaned_at, last_checked)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(forge, owner, repo) DO UPDATE SET
+                version = excluded.version,
+                asset_filename = excluded.asset_filename,
+                checksum = excluded.checksum,
+                install_path = excluded.install_path,
+                is_managed = excluded.is_managed,
+                status = excluded.status,
+                orphaned_at = excluded.orphaned_at,
+                last_checked = excluded.last_checked
+            "#,
+        )
+        .bind(&pkg.forge)
+        .bind(&pkg.owner)
+        .bind(&pkg.repo)
+        .bind(&pkg.version)
+        .bind(&pkg.asset_filename)
+        .bind(&pkg.checksum)
+        .bind(&pkg.install_path)
+        .bind(pkg.is_managed)
+        .bind(pkg.status.to_string())
+        .bind(pkg.orphaned_at)
+        .bind(pkg.last_checked)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
+    /// Get a package by reference
+    pub async fn get_package(
+        &self,
+        forge: &str,
+        owner: &str,
+        repo: &str,
+    ) -> Result<Option<InstalledPackage>, DatabaseError> {
+        let row = sqlx::query(
+            r#"
+            SELECT id, forge, owner, repo, version, asset_filename, checksum, 
+                   install_path, is_managed, status, orphaned_at, last_checked, installed_at
+            FROM installed
+            WHERE forge = ? AND owner = ? AND repo = ?
+            "#,
+        )
+        .bind(forge)
+        .bind(owner)
+        .bind(repo)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row.map(Self::row_to_package))
+    }
+
+    /// List all packages
+    pub async fn list_packages(&self) -> Result<Vec<InstalledPackage>, DatabaseError> {
+        let rows = sqlx::query(
+            r#"
+            SELECT id, forge, owner, repo, version, asset_filename, checksum, 
+                   install_path, is_managed, status, orphaned_at, last_checked, installed_at
+            FROM installed
+            ORDER BY forge, owner, repo
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows.into_iter().map(Self::row_to_package).collect())
+    }
+
+    /// Mark a package as orphaned
+    pub async fn mark_orphaned(&self, id: i64) -> Result<(), DatabaseError> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        sqlx::query(
+            r#"
+            UPDATE installed 
+            SET status = 'orphaned', orphaned_at = ?
+            WHERE id = ?
+            "#,
+        )
+        .bind(now)
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
+    /// Remove a package
+    pub async fn remove_package(&self, id: i64) -> Result<(), DatabaseError> {
+        sqlx::query("DELETE FROM installed WHERE id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+
+        Ok(())
+    }
+
+    /// Update package version and asset info
+    pub async fn update_package(
+        &self,
+        id: i64,
+        version: &str,
+        asset_filename: &str,
+        checksum: Option<&str>,
+    ) -> Result<(), DatabaseError> {
+        sqlx::query(
+            r#"
+            UPDATE installed 
+            SET version = ?, asset_filename = ?, checksum = ?, 
+                last_checked = strftime('%s', 'now')
+            WHERE id = ?
+            "#,
+        )
+        .bind(version)
+        .bind(asset_filename)
+        .bind(checksum)
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
+    /// Helper to convert a database row to InstalledPackage
+    fn row_to_package(row: sqlx::sqlite::SqliteRow) -> InstalledPackage {
+        InstalledPackage {
+            id: Some(row.get("id")),
+            forge: row.get("forge"),
+            owner: row.get("owner"),
+            repo: row.get("repo"),
+            version: row.get("version"),
+            asset_filename: row.get("asset_filename"),
+            checksum: row.get("checksum"),
+            install_path: row.get("install_path"),
+            is_managed: row.get("is_managed"),
+            status: PackageStatus::from_str(&row.get::<String, _>("status")),
+            orphaned_at: row.get("orphaned_at"),
+            last_checked: row.get("last_checked"),
+            installed_at: row.get("installed_at"),
+        }
+    }
+
+    /// Store ETag
+    pub async fn store_etag(&self, url: &str, etag: &str) -> Result<(), DatabaseError> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        sqlx::query(
+            r#"
+            INSERT INTO etag_cache (url, etag, last_modified)
+            VALUES (?, ?, ?)
+            ON CONFLICT(url) DO UPDATE SET etag = excluded.etag, last_modified = excluded.last_modified
+            "#,
+        )
+        .bind(url)
+        .bind(etag)
+        .bind(now)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
+    /// Get ETag
+    pub async fn get_etag(&self, url: &str) -> Result<Option<String>, DatabaseError> {
+        let row = sqlx::query("SELECT etag FROM etag_cache WHERE url = ?")
+            .bind(url)
+            .fetch_optional(&self.pool)
+            .await?;
+
+        Ok(row.map(|r| r.get("etag")))
+    }
+
+    /// Close the database connection
+    pub async fn close(self) {
+        self.pool.close().await;
+    }
+}
+
+/// Database errors
+#[derive(Debug, thiserror::Error)]
+pub enum DatabaseError {
+    #[error("Database error: {0}")]
+    SqlxError(#[from] sqlx::Error),
+
+    #[error("IO error: {0}")]
+    IoError(#[from] std::io::Error),
+
+    #[error("Package not found: {0}")]
+    NotFound(String),
+}

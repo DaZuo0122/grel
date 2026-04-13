@@ -1,0 +1,22 @@
+[package]
+name = "grel-cache"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "SQLite state management and caching for grel"
+
+[dependencies]
+grel-core = { path = "../grel-core" }
+grel-config = { path = "../grel-config" }
+
+sqlx.workspace = true
+tokio.workspace = true
+serde.workspace = true
+chrono.workspace = true
+tracing.workspace = true
+thiserror.workspace = true
+directories.workspace = true
+
+[lints]
+workspace = true

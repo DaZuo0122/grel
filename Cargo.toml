@@ -1,0 +1,103 @@
+[package]
+name = "grel"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "A package manager for pre-built binaries from Git forges"
+
+[[bin]]
+name = "grel"
+path = "src/main.rs"
+
+[dependencies]
+grel-cli = { path = "crates/grel-cli" }
+grel-core = { path = "crates/grel-core" }
+grel-config = { path = "crates/grel-config" }
+grel-cache = { path = "crates/grel-cache" }
+grel-network = { path = "crates/grel-network" }
+grel-providers = { path = "crates/grel-providers" }
+
+tokio.workspace = true
+clap.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+tracing-indicatif.workspace = true
+anyhow.workspace = true
+indicatif.workspace = true
+tabled.workspace = true
+owo-colors.workspace = true
+chrono.workspace = true
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+reqwest.workspace = true
+
+[workspace]
+resolver = "2"
+members = [
+    "crates/grel-cli",
+    "crates/grel-core",
+    "crates/grel-providers",
+    "crates/grel-network",
+    "crates/grel-cache",
+    "crates/grel-config",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+
+[workspace.lints.rust]
+unsafe_code = "warn"
+
+[workspace.lints.clippy]
+all = "warn"
+pedantic = "warn"
+
+[workspace.dependencies]
+# Core & Async
+tokio = { version = "1", features = ["full"] }
+futures = "0.3"
+async-trait = "0.1"
+
+# CLI & UX
+clap = { version = "4", features = ["derive", "wrap_help", "string"] }
+indicatif = { version = "0.17", features = ["tokio"] }
+tracing-indicatif = "0.3"
+tabled = "0.16"
+owo-colors = "4"
+
+# Network & Proxy
+reqwest = { version = "0.12", features = ["rustls-tls", "json", "socks", "stream"] }
+hickory-resolver = "0.24"
+dashmap = "6"
+
+# Cache & Storage
+sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "sqlite"] }
+sha2 = "0.10"
+directories = "5"
+tar = "0.4"
+zip = "2"
+zstd = "0.13"
+xz2 = "0.1"
+bzip2 = "0.5"
+sanitize-filename = "0.5"
+
+# Config & Utils
+figment = { version = "0.10", features = ["toml", "env"] }
+semver = "1"
+url = "2"
+chrono = { version = "0.4", features = ["serde"] }
+regex = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+dirs = "5"

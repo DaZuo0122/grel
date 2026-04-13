@@ -1,0 +1,26 @@
+[package]
+name = "grel-providers"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Git forge provider adapters for grel"
+
+[dependencies]
+grel-core = { path = "../grel-core" }
+grel-config = { path = "../grel-config" }
+
+async-trait.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tokio.workspace = true
+url.workspace = true
+urlencoding = "2"
+
+[dev-dependencies]
+serde_json = "1"
+
+[lints]
+workspace = true
