@@ -33,3 +33,7 @@ Thumbs.db
 # Environment
 .env
 .env.local
+
+# Agents
+AGENTS.md
+/skills
