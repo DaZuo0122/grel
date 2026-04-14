@@ -209,20 +209,39 @@ async fn cmd_sync(
             .get_provider(&pkg_ref.forge)
             .with_context(|| format!("Failed to get provider for {}", pkg_ref.forge))?;
 
-        // Fetch latest release
-        let release = match provider.latest_release(&pkg_ref.owner, &pkg_ref.repo).await {
-            Ok(r) => r,
-            Err(grel_providers::ProviderError::NotFound(e)) => {
-                eprintln!("{}", format!("Package not found: {e}").red());
-                continue;
+        // Fetch release: pinned version or latest
+        let release = if let Some(ref tag) = pkg_ref.version {
+            println!("  Pinning to version {tag}");
+            match provider.get_release(&pkg_ref.owner, &pkg_ref.repo, tag).await {
+                Ok(r) => r,
+                Err(grel_providers::ProviderError::NotFound(e)) => {
+                    eprintln!("{}", format!("Release not found: {e}").red());
+                    continue;
+                }
+                Err(grel_providers::ProviderError::RateLimitExceeded) => {
+                    eprintln!("{}", "Rate limit exceeded. Set GREL_GITHUB_TOKEN for higher limits.".red());
+                    continue;
+                }
+                Err(e) => {
+                    eprintln!("{}", format!("Failed to fetch release: {e}").red());
+                    continue;
+                }
             }
-            Err(grel_providers::ProviderError::RateLimitExceeded) => {
-                eprintln!("{}", "Rate limit exceeded. Set GREL_GITHUB_TOKEN for higher limits.".red());
-                continue;
-            }
-            Err(e) => {
-                eprintln!("{}", format!("Failed to fetch release: {e}").red());
-                continue;
+        } else {
+            match provider.latest_release(&pkg_ref.owner, &pkg_ref.repo).await {
+                Ok(r) => r,
+                Err(grel_providers::ProviderError::NotFound(e)) => {
+                    eprintln!("{}", format!("Package not found: {e}").red());
+                    continue;
+                }
+                Err(grel_providers::ProviderError::RateLimitExceeded) => {
+                    eprintln!("{}", "Rate limit exceeded. Set GREL_GITHUB_TOKEN for higher limits.".red());
+                    continue;
+                }
+                Err(e) => {
+                    eprintln!("{}", format!("Failed to fetch release: {e}").red());
+                    continue;
+                }
             }
         };
 

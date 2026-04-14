@@ -186,6 +186,7 @@ fn parse_two_parts_uses_default_forge() {
     assert_eq!(pkg.forge, Forge::GitHub);
     assert_eq!(pkg.owner, "cli");
     assert_eq!(pkg.repo, "cli");
+    assert_eq!(pkg.version, None);
 }
 
 #[test]
@@ -194,6 +195,7 @@ fn parse_two_parts_with_gitlab_forge() {
     assert_eq!(pkg.forge, Forge::GitLab);
     assert_eq!(pkg.owner, "gnome");
     assert_eq!(pkg.repo, "evince");
+    assert_eq!(pkg.version, None);
 }
 
 #[test]
@@ -202,4 +204,23 @@ fn parse_three_parts_overrides_default_forge() {
     assert_eq!(pkg.forge, Forge::GitHub);
     assert_eq!(pkg.owner, "cli");
     assert_eq!(pkg.repo, "cli");
+    assert_eq!(pkg.version, None);
+}
+
+#[test]
+fn parse_owner_repo_with_version() {
+    let pkg = PackageRef::parse_with_forge("BurntSushi/ripgrep@v14.1.1", Forge::GitHub).unwrap();
+    assert_eq!(pkg.forge, Forge::GitHub);
+    assert_eq!(pkg.owner, "BurntSushi");
+    assert_eq!(pkg.repo, "ripgrep");
+    assert_eq!(pkg.version, Some("v14.1.1".into()));
+}
+
+#[test]
+fn parse_forge_owner_repo_with_version() {
+    let pkg = PackageRef::parse_with_forge("gitlab/foo/bar@1.0.0-beta.1", Forge::GitHub).unwrap();
+    assert_eq!(pkg.forge, Forge::GitLab);
+    assert_eq!(pkg.owner, "foo");
+    assert_eq!(pkg.repo, "bar");
+    assert_eq!(pkg.version, Some("1.0.0-beta.1".into()));
 }
