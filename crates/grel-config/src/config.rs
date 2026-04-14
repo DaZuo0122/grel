@@ -153,6 +153,12 @@ fn exclude_keywords_default() -> Vec<String> {
         "installer".into(),
         "bundle".into(),
         "nupkg".into(),
+        // Standalone checksum / signature files without an extension
+        // (e.g. "SHA256SUMS", "checksums", "MD5SUMS")
+        "sha256sums".into(),
+        "sha512sums".into(),
+        "md5sums".into(),
+        "checksums".into(),
     ]
 }
 
@@ -164,6 +170,17 @@ fn ignore_formats_default() -> Vec<String> {
         "*.dmg".into(),
         "*.pkg".into(),
         "*.AppImage".into(),
+        // Checksum files (e.g. "foo.tar.gz.sha256")
+        "*.sha256".into(),
+        "*.sha512".into(),
+        "*.sha384".into(),
+        "*.sha1".into(),
+        "*.md5".into(),
+        "*.b2sum".into(),
+        // Detached signature files
+        "*.asc".into(),
+        "*.sig".into(),
+        "*.minisig".into(),
     ]
 }
 

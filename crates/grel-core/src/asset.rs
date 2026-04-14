@@ -192,6 +192,8 @@ fn detect_format(filename: &str) -> String {
     const SIMPLE: &[&str] = &[
         "exe", "zip", "deb", "rpm", "msi", "dmg", "pkg", "appimage", "gz", "xz", "bz2", "zst",
         "tar", "7z",
+        // Checksum / signature files (e.g. "foo.tar.gz.sha256" → format "sha256")
+        "sha256", "sha512", "sha384", "sha1", "md5", "b2sum", "asc", "sig", "minisig",
     ];
     for ext in SIMPLE {
         if filename.ends_with(&format!(".{ext}")) {
@@ -481,5 +483,40 @@ mod tests {
         let t = AssetTokens::from_filename("tool-aarch64-apple-darwin.tar.gz");
         assert_eq!(t.os, Os::MacOS);
         assert_eq!(t.arch, Arch::Aarch64);
+    }
+
+    // ---- checksum / signature files ----------------------------------------
+
+    #[test]
+    fn test_sha256_checksum_file_detected() {
+        // "foo.tar.gz.sha256" must be recognised as format "sha256"
+        let t = AssetTokens::from_filename(
+            "ripgrep-14.1.1-x86_64-unknown-linux-musl.tar.gz.sha256",
+        );
+        assert_eq!(t.format, "sha256");
+    }
+
+    #[test]
+    fn test_sha512_checksum_file_detected() {
+        let t = AssetTokens::from_filename("tool-1.0.0-linux-amd64.tar.gz.sha512");
+        assert_eq!(t.format, "sha512");
+    }
+
+    #[test]
+    fn test_asc_signature_file_detected() {
+        let t = AssetTokens::from_filename("tool-1.0.0-linux-amd64.tar.gz.asc");
+        assert_eq!(t.format, "asc");
+    }
+
+    #[test]
+    fn test_sig_signature_file_detected() {
+        let t = AssetTokens::from_filename("tool-1.0.0-linux-amd64.zip.sig");
+        assert_eq!(t.format, "sig");
+    }
+
+    #[test]
+    fn test_md5_checksum_file_detected() {
+        let t = AssetTokens::from_filename("tool-1.0.0-linux-amd64.zip.md5");
+        assert_eq!(t.format, "md5");
     }
 }
