@@ -1,7 +1,9 @@
 //! HTTP client builder with proxy and DNS configuration.
 
 use grel_config::GeneralConfig;
-use reqwest::Client;
+
+/// Re-export of the underlying HTTP client type
+pub type Client = reqwest::Client;
 
 /// Build a configured HTTP client
 pub fn build_http_client(config: &GeneralConfig) -> Result<Client, NetworkError> {

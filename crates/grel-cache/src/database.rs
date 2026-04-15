@@ -245,11 +245,13 @@ impl Database {
         version: &str,
         asset_filename: &str,
         checksum: Option<&str>,
+        installed_binaries: Option<&str>,
     ) -> Result<(), DatabaseError> {
         sqlx::query(
             r#"
-            UPDATE installed 
-            SET version = ?, asset_filename = ?, checksum = ?, 
+            UPDATE installed
+            SET version = ?, asset_filename = ?, checksum = ?,
+                installed_binaries = COALESCE(?, installed_binaries),
                 last_checked = strftime('%s', 'now')
             WHERE id = ?
             "#,
@@ -257,6 +259,7 @@ impl Database {
         .bind(version)
         .bind(asset_filename)
         .bind(checksum)
+        .bind(installed_binaries)
         .bind(id)
         .execute(&self.pool)
         .await?;

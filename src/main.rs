@@ -9,7 +9,7 @@ use grel_cli::{Cli, Operation};
 use grel_config::{load_config, Config};
 use grel_core::{PackageRef, Os, Arch, ResolverConfig, RemoteAsset};
 use grel_core::Forge;
-use grel_network::build_http_client;
+use grel_network::{build_http_client, Client};
 use grel_providers::ProviderRegistry;
 use owo_colors::OwoColorize;
 use tracing_indicatif::IndicatifLayer;
@@ -685,6 +685,7 @@ async fn cmd_upgrade(
     default_forge: Forge,
     refresh: bool,
 ) -> Result<()> {
+    // Step 1: Initialize
     if refresh {
         println!("{}", "Synchronizing package database...".bold());
     }
@@ -707,9 +708,275 @@ async fn cmd_upgrade(
         return Ok(());
     }
 
-    let _ = (active_packages.len(), noconfirm, default_forge, refresh, db);
-    // TODO: Implement full upgrade pipeline
-    println!("  {}", "Upgrade pipeline not yet fully implemented".yellow());
+    // Step 2: Build upgrade plan
+    let client = build_http_client(&config.general)?;
+    let github_token = std::env::var("GREL_GITHUB_TOKEN").ok();
+    let registry = ProviderRegistry::new(client.clone(), github_token);
+
+    let host_os = Os::host();
+    let host_arch = Arch::host();
+
+    let selection_policy = match config.assets.default_selection_policy {
+        grel_config::SelectionPolicy::First => grel_core::SelectionPolicy::First,
+        grel_config::SelectionPolicy::Largest => grel_core::SelectionPolicy::Largest,
+    };
+    let resolver_config = ResolverConfig {
+        default_selection_policy: selection_policy,
+        exclude_keywords: config.assets.exclude_keywords.clone(),
+        ignore_formats: config.assets.ignore_formats.clone(),
+        prefer_formats: config.assets.prefer_formats.clone(),
+        prefer_32bit_on_64bit: config.assets.prefer_32bit_on_64bit,
+        fallback_to_32bit: config.assets.fallback_to_32bit,
+        prefer_musl: config.assets.prefer_musl,
+    };
+
+    let mut upgrades = Vec::new();
+    let mut up_to_date = Vec::new();
+    let mut orphaned = Vec::new();
+    let mut errors = Vec::new();
+
+    for pkg in &active_packages {
+        let forge: Forge = pkg.forge.parse().unwrap_or(default_forge);
+        let pkg_ref_str = format!("{}/{}", pkg.owner, pkg.repo);
+
+        let provider = match registry.get_provider(&forge) {
+            Ok(p) => p,
+            Err(e) => {
+                errors.push((pkg_ref_str.clone(), e.to_string()));
+                continue;
+            }
+        };
+
+        // Fetch latest release
+        let release = match provider.latest_release(&pkg.owner, &pkg.repo).await {
+            Ok(r) => r,
+            Err(grel_providers::ProviderError::NotFound(_)) => {
+                // Mark as orphaned
+                if let Some(id) = pkg.id {
+                    db.mark_orphaned(id).await.ok();
+                }
+                orphaned.push(pkg_ref_str.clone());
+                continue;
+            }
+            Err(e) => {
+                errors.push((pkg_ref_str.clone(), e.to_string()));
+                continue;
+            }
+        };
+
+        // Check if there's an update
+        if release.tag == pkg.version && release.assets.iter().any(|a| a.filename == pkg.asset_filename) {
+            up_to_date.push(pkg_ref_str.clone());
+            continue;
+        }
+
+        // Resolve the best asset for the new release
+        let remote_assets: Vec<RemoteAsset> = release.assets.clone();
+        let selection = grel_core::resolve_assets(
+            &remote_assets,
+            &host_os,
+            &host_arch,
+            &resolver_config,
+            false,
+        );
+
+        let chosen_asset = match selection {
+            grel_core::SelectionResult::SingleAsset(a) => a,
+            grel_core::SelectionResult::NoCompatibleAssets => {
+                errors.push((pkg_ref_str.clone(), "No compatible assets in new release".into()));
+                continue;
+            }
+            grel_core::SelectionResult::MultipleAssets(assets) => assets.into_iter().next().unwrap(),
+        };
+
+        let renamed = chosen_asset.filename != pkg.asset_filename;
+
+        upgrades.push((
+            pkg.clone(),
+            release,
+            chosen_asset,
+            renamed,
+            forge,
+        ));
+    }
+
+    // Step 3: Show plan
+    if refresh {
+        println!();
+    }
+    if upgrades.is_empty() && up_to_date.is_empty() && orphaned.is_empty() && errors.is_empty() {
+        println!("Nothing to do.");
+        db.close().await;
+        return Ok(());
+    }
+
+    if !upgrades.is_empty() {
+        println!(
+            "{}",
+            format!("{} package(s) to upgrade:", upgrades.len()).bold()
+        );
+        for (pkg, release, asset, renamed, _) in &upgrades {
+            let rename_note = if *renamed {
+                format!(" (asset renamed: {} → {})", pkg.asset_filename, asset.filename)
+            } else {
+                String::new()
+            };
+            println!(
+                "  {} {} → {}{}",
+                format!("{}/{}", pkg.owner, pkg.repo).bold(),
+                pkg.version,
+                release.tag,
+                rename_note,
+            );
+        }
+        println!();
+    }
+
+    if !orphaned.is_empty() {
+        println!(
+            "{}",
+            format!("{} package(s) orphaned (repo not found):", orphaned.len()).yellow()
+        );
+        for name in &orphaned {
+            println!("  {name}");
+        }
+        println!();
+    }
+
+    // Step 4: Confirm
+    if !noconfirm && !grel_cli::is_interactive() {
+        eprintln!("Info: Non-interactive mode, proceeding automatically");
+    } else if !noconfirm && !upgrades.is_empty() {
+        let accepted = grel_cli::ask_confirmation("Proceed with upgrade?", true);
+        if !accepted {
+            println!("Cancelled.");
+            db.close().await;
+            return Ok(());
+        }
+    }
+
+    // Step 5: Execute upgrades
+    let mut upgraded = 0;
+    let mut failed = 0;
+
+    for (pkg, release, asset, renamed, forge) in &upgrades {
+        let pkg_ref_str = format!("{}/{}", pkg.owner, pkg.repo);
+        print!("  {} {pkg_ref_str} {} → {} ... ", "→".cyan(), pkg.version, release.tag);
+
+        match upgrade_single_package(
+            &db, &client, pkg, release.clone(), asset.clone(), *renamed,
+            config, *forge,
+        ).await {
+            Ok(_) => {
+                println!("{}", "ok".green());
+                upgraded += 1;
+            }
+            Err(e) => {
+                println!("{}", format!("FAILED: {e}").red());
+                failed += 1;
+            }
+        }
+    }
+
+    // Step 6: Summary
+    println!();
+    println!("{}", "Upgrade summary:".bold());
+    println!("  Upgraded:  {upgraded}");
+    println!("  Up-to-date: {}", up_to_date.len());
+    println!("  Orphaned:  {}", orphaned.len());
+    println!("  Failed:    {failed}");
+    if !errors.is_empty() {
+        println!("  Errors:");
+        for (pkg, err) in &errors {
+            println!("    {pkg}: {err}");
+        }
+    }
+
+    db.close().await;
+    Ok(())
+}
+
+/// Upgrade a single package: download → extract → atomic replace → DB update
+async fn upgrade_single_package(
+    db: &Database,
+    client: &Client,
+    pkg: &models::InstalledPackage,
+    release: grel_providers::Release,
+    asset: RemoteAsset,
+    renamed: bool,
+    config: &Config,
+    _forge: Forge,
+) -> Result<()> {
+    let install_dir = if pkg.is_managed {
+        config.paths.install_root.join(format!(
+            "{}/{}/{}",
+            pkg.forge, pkg.owner, pkg.repo
+        ))
+    } else {
+        config.paths.download_dir.clone()
+    };
+
+    let archive_path = install_dir.join(&asset.filename);
+
+    // Ensure destination exists
+    std::fs::create_dir_all(&install_dir).map_err(|e| {
+        anyhow::anyhow!("Failed to create directory: {e}")
+    })?;
+
+    // Download new asset
+    let checksum = grel_network::download::download_file(
+        client,
+        &asset.url,
+        &archive_path,
+        None,
+    )
+    .await
+    .with_context(|| format!("Failed to download {}", asset.filename))?;
+
+    // If managed, extract and install
+    if pkg.is_managed {
+        match grel_network::archive::install_asset(
+            &archive_path,
+            &install_dir,
+            &config.paths.bin_dir,
+            &asset.filename,
+        ) {
+            Ok(result) => {
+                let bin_filenames: Vec<String> = result.installed_binaries
+                    .iter()
+                    .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
+                    .collect();
+
+                // Update DB with new version, asset, checksum, and binaries
+                if let Some(id) = pkg.id {
+                    let bins = if bin_filenames.is_empty() { None } else { Some(bin_filenames.join(";")) };
+                    db.update_package(id, &release.tag, &asset.filename, Some(&checksum), bins.as_deref()).await?;
+                }
+            }
+            Err(e) => {
+                return Err(anyhow::anyhow!("Failed to extract: {e}"));
+            }
+        }
+
+        // Clean up old archive if renamed
+        if renamed {
+            let old_archive = install_dir.join(&pkg.asset_filename);
+            if old_archive.exists() && old_archive != archive_path {
+                std::fs::remove_file(&old_archive).ok();
+            }
+        }
+    } else {
+        // Unmanaged: just update DB
+        if let Some(id) = pkg.id {
+            db.update_package(id, &release.tag, &asset.filename, Some(&checksum), None).await?;
+        }
+    }
+
+    // Clean up archive if not keeping
+    if !config.general.keep_archives && archive_path.exists() {
+        std::fs::remove_file(&archive_path).ok();
+    }
+
     Ok(())
 }
 
