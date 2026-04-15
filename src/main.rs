@@ -258,36 +258,73 @@ async fn cmd_sync(
         // Convert provider assets to RemoteAssets
         let remote_assets: Vec<RemoteAsset> = release.assets.clone();
 
-        // Resolve assets with full details (default + alternatives)
-        let Some(mut sel) = grel_core::resolve_assets_detailed(
-            &remote_assets,
-            &host_os,
-            &host_arch,
-            &resolver_config,
-            allow_keyword,
-        ) else {
-            eprintln!(
-                "  {}",
-                format!("No compatible assets for {host_os}/{host_arch}").red()
-            );
-            continue;
-        };
+        // Check for --asset override: bypass auto-selection, download exact filename
+        let chosen_asset = if let Some(ref asset_name) = cli.asset {
+            let found = remote_assets.iter().find(|a| a.filename == *asset_name);
+            match found {
+                Some(a) => {
+                    println!("  {}", format!("Using specified asset: {asset_name}").dimmed());
+                    a.clone()
+                }
+                None => {
+                    eprintln!(
+                        "  {}",
+                        format!("Asset '{asset_name}' not found in release. Available assets:").red()
+                    );
+                    for a in &remote_assets {
+                        eprintln!("    {}", a.filename);
+                    }
+                    continue;
+                }
+            }
+        } else {
+            // Parse --platform override
+            let (target_os, target_arch) = if let Some(ref platform_str) = cli.platform {
+                let parts: Vec<&str> = platform_str.split('/').collect();
+                if parts.len() == 2 {
+                    let os = parts[0].parse::<Os>().unwrap_or(Os::Unknown(parts[0].to_string()));
+                    let arch = parts[1].parse::<Arch>().unwrap_or(Arch::Unknown(parts[1].to_string()));
+                    println!("  {}", format!("Platform override: {os}/{arch}").dimmed());
+                    (os, arch)
+                } else {
+                    eprintln!("  {}", "Invalid --platform format, expected os/arch (e.g. linux/aarch64)".red());
+                    continue;
+                }
+            } else {
+                (host_os.clone(), host_arch.clone())
+            };
 
-        // Determine if default asset is managed
-        let is_managed_default = is_asset_managed(&sel.default, &config.assets);
-        sel.default_is_managed = is_managed_default;
-
-        // Interactive confirmation / alternative selection
-        let chosen_asset = match confirm_asset_selection(
-            &sel,
-            &config,
-            noconfirm,
-            allow_keyword,
-        ) {
-            Some(asset) => asset,
-            None => {
-                eprintln!("  Skipped");
+            // Resolve assets with full details (default + alternatives)
+            let Some(mut sel) = grel_core::resolve_assets_detailed(
+                &remote_assets,
+                &target_os,
+                &target_arch,
+                &resolver_config,
+                allow_keyword,
+            ) else {
+                eprintln!(
+                    "  {}",
+                    format!("No compatible assets for {target_os}/{target_arch}").red()
+                );
                 continue;
+            };
+
+            // Determine if default asset is managed
+            let is_managed_default = is_asset_managed(&sel.default, &config.assets);
+            sel.default_is_managed = is_managed_default;
+
+            // Interactive confirmation / alternative selection
+            match confirm_asset_selection(
+                &sel,
+                &config,
+                noconfirm,
+                allow_keyword,
+            ) {
+                Some(asset) => asset,
+                None => {
+                    eprintln!("  Skipped");
+                    continue;
+                }
             }
         };
 
@@ -1199,8 +1236,57 @@ async fn cmd_verify_checksums(config: &Config) -> Result<()> {
         return Ok(());
     }
 
-    // TODO: Re-compute checksums and compare
-    println!("  {}", "Checksum verification not yet implemented".yellow());
+    println!("{}","Verifying checksums...".bold());
+
+    let mut ok = 0;
+    let mut failed = 0;
+    let mut missing = 0;
+
+    for pkg in &active {
+        let archive_path = std::path::Path::new(&pkg.install_path).join(&pkg.asset_filename);
+
+        print!("  {:<35} ", pkg.package_ref());
+
+        if !archive_path.exists() {
+            println!("{}", "MISSING (archive deleted)".red());
+            missing += 1;
+            continue;
+        }
+
+        // Compute checksum
+        let computed = {
+            use sha2::Digest;
+            use std::io::Read;
+            let mut hasher = sha2::Sha256::new();
+            let mut file = std::fs::File::open(&archive_path)?;
+            let mut buf = [0u8; 65536];
+            loop {
+                let n = file.read(&mut buf)?;
+                if n == 0 { break; }
+                hasher.update(&buf[..n]);
+            }
+            format!("{:x}", hasher.finalize())
+        };
+
+        if let Some(ref expected) = pkg.checksum {
+            if computed == *expected {
+                println!("{}", "OK".green());
+                ok += 1;
+            } else {
+                println!("{}", format!("FAILED (expected: {})", &expected[..16]).red());
+                failed += 1;
+            }
+        }
+    }
+
+    println!();
+    println!("  Verified: {ok}");
+    if failed > 0 {
+        println!("  {}", format!("Failed: {failed}").red());
+    }
+    if missing > 0 {
+        println!("  {}", format!("Missing: {missing}").yellow());
+    }
 
     db.close().await;
     Ok(())
@@ -1417,21 +1503,186 @@ async fn cmd_db_as_deps(config: &Config, pkg_ref_str: &str) -> Result<()> {
 }
 
 // ---------------------------------------------------------------------------
-// Upgrade from local file (-U)
+// Local file install (-U)
 // ---------------------------------------------------------------------------
 
 async fn cmd_upgrade_local(
-    _config: &Config,
+    config: &Config,
     targets: &[String],
-    _noconfirm: bool,
+    noconfirm: bool,
     cli: &Cli,
 ) -> Result<()> {
-    if targets.is_empty() && cli.local_asset.is_none() {
+    // Get file path from --local-asset or first target
+    let file_path = if let Some(ref path) = cli.local_asset {
+        std::path::PathBuf::from(path)
+    } else if let Some(first) = targets.first() {
+        std::path::PathBuf::from(first)
+    } else {
         eprintln!("No file specified. Usage: grel -U ./package.tar.gz");
         return Ok(());
+    };
+
+    if !file_path.exists() {
+        eprintln!("{}", format!("File not found: {}", file_path.display()).red());
+        return Ok(());
     }
-    // TODO: Implement local file install
-    println!("  {}", "Local file upgrade not yet implemented".yellow());
+
+    let filename = file_path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .ok_or_else(|| anyhow::anyhow!("Invalid file path"))?;
+
+    println!("  Installing from local file: {}", filename.bold());
+
+    // Try to derive package reference from filename or use first target as package ref
+    let (pkg_ref_str, asset_path) = if targets.len() >= 2 {
+        // First arg is package ref, second is file (when not using --local-asset)
+        (targets[0].clone(), file_path)
+    } else if cli.local_asset.is_some() && !targets.is_empty() {
+        // --local-asset used with package ref as target
+        (targets[0].clone(), file_path)
+    } else {
+        // Try to infer package ref from filename: e.g. ripgrep-15.0.0-x86_64-linux.tar.gz
+        let _tokens = grel_core::AssetTokens::from_filename(&filename);
+        // Use "local/<filename_without_ext>" as a synthetic package ref
+        let stem = std::path::Path::new(&filename)
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| "unknown".into());
+        (format!("local/{stem}"), file_path)
+    };
+
+    // Parse package reference
+    let pkg_ref = PackageRef::parse_with_forge(&pkg_ref_str, cli.default_forge.0)
+        .with_context(|| format!("Invalid package reference: {pkg_ref_str}"))?;
+
+    // Check if package already installed
+    let db_path = config.paths.install_root.join("state.sqlite");
+    let db = Database::init(&db_path)
+        .await
+        .with_context(|| format!("Failed to initialize database at {}", db_path.display()))?;
+
+    let existing = db.get_package(&pkg_ref.forge.to_string(), &pkg_ref.owner, &pkg_ref.repo).await?;
+    if let Some(ref existing_pkg) = existing {
+        if !noconfirm {
+            let accepted = grel_cli::ask_confirmation(
+                &format!("{} v{} is already installed. Reinstall?", pkg_ref.to_short_ref(), existing_pkg.version),
+                false,
+            );
+            if !accepted {
+                println!("Cancelled.");
+                db.close().await;
+                return Ok(());
+            }
+        }
+
+        // Remove old installation
+        let old_install_dir = std::path::Path::new(&existing_pkg.install_path);
+        if old_install_dir.exists() {
+            if old_install_dir.is_dir() {
+                std::fs::remove_dir_all(old_install_dir).ok();
+            } else {
+                std::fs::remove_file(old_install_dir).ok();
+            }
+        }
+        // Remove old binaries
+        for bin_name in existing_pkg.binary_list() {
+            std::fs::remove_file(config.paths.bin_dir.join(&bin_name)).ok();
+        }
+    }
+
+    // Install directory
+    let install_dir = config.paths.install_root.join(format!(
+        "{}/{}/{}",
+        pkg_ref.forge, pkg_ref.owner, pkg_ref.repo
+    ));
+
+    if cli.dry_run {
+        println!("  {}", format!("(dry-run: would install {filename} to {})", install_dir.display()).yellow());
+        db.close().await;
+        return Ok(());
+    }
+
+    std::fs::create_dir_all(&install_dir).map_err(|e| {
+        anyhow::anyhow!("Failed to create directory: {e}")
+    })?;
+
+    // Copy file to install directory
+    let dest_path = install_dir.join(&filename);
+    std::fs::copy(&asset_path, &dest_path).map_err(|e| {
+        anyhow::anyhow!("Failed to copy file: {e}")
+    })?;
+
+    // Compute checksum
+    let checksum = {
+        use sha2::Digest;
+        use std::io::Read;
+        let mut hasher = sha2::Sha256::new();
+        let mut file = std::fs::File::open(&dest_path)?;
+        let mut buf = [0u8; 8192];
+        loop {
+            let n = file.read(&mut buf)?;
+            if n == 0 { break; }
+            hasher.update(&buf[..n]);
+        }
+        format!("{:x}", hasher.finalize())
+    };
+
+    // Extract if archive
+    let install_result = grel_network::archive::install_asset(
+        &dest_path,
+        &install_dir,
+        &config.paths.bin_dir,
+        &filename,
+    );
+
+    let (installed_binaries, is_managed) = match install_result {
+        Ok(result) => {
+            let bins: Vec<String> = result.installed_binaries
+                .iter()
+                .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
+                .collect();
+            if !result.is_plain_binary {
+                println!("  {}", format!("Extracted {} binary(s)", bins.len()).green());
+            } else {
+                println!("  {}", "Installed binary".green());
+            }
+            (bins, true)
+        }
+        Err(_) => {
+            // Treat as unmanaged file
+            println!("  {}", "Warning: Could not extract, keeping as unmanaged".yellow());
+            (vec![], false)
+        }
+    };
+
+    // Clean up archive if not keeping
+    if !config.general.keep_archives {
+        std::fs::remove_file(&dest_path).ok();
+    }
+
+    // Record in database
+    let mut pkg = models::InstalledPackage::new(
+        pkg_ref.forge.to_string(),
+        pkg_ref.owner.clone(),
+        pkg_ref.repo.clone(),
+    );
+    pkg.version = "local".into();
+    pkg.asset_filename = filename;
+    pkg.checksum = Some(checksum);
+    pkg.install_path = install_dir.to_string_lossy().to_string();
+    pkg.set_binary_list(installed_binaries);
+    pkg.is_managed = is_managed;
+    pkg.status = models::PackageStatus::Active;
+
+    db.upsert_package(&pkg).await?;
+
+    println!(
+        "  {}",
+        format!("Installed {} from local file", pkg_ref.to_short_ref()).green()
+    );
+
+    db.close().await;
     Ok(())
 }
 

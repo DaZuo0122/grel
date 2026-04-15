@@ -61,7 +61,8 @@ pub fn install_asset(
             link_binaries(install_dir, bin_dir, asset_filename)
         }
         ArchiveType::TarXz => {
-            extract_tar_xz(archive_path, install_dir)
+            extract_tar_xz(archive_path, install_dir)?;
+            link_binaries(install_dir, bin_dir, asset_filename)
         }
         ArchiveType::Plain => install_plain_binary(archive_path, install_dir, bin_dir, asset_filename),
     }
@@ -200,11 +201,59 @@ fn extract_tar_gz(archive_path: &Path, install_dir: &Path) -> Result<(), Network
     Ok(())
 }
 
-/// Extract tar.xz (stub)
-fn extract_tar_xz(_archive_path: &Path, _install_dir: &Path) -> Result<InstallResult, NetworkError> {
-    Err(NetworkError::OperationFailed(
-        "tar.xz extraction not yet implemented".into(),
-    ))
+/// Extract a tar.xz archive into `<install_dir>/extracted/`
+fn extract_tar_xz(archive_path: &Path, install_dir: &Path) -> Result<(), NetworkError> {
+    let out_dir = install_dir.join("extracted");
+    std::fs::create_dir_all(&out_dir).map_err(|e| {
+        NetworkError::OperationFailed(format!("Failed to create extract dir: {e}"))
+    })?;
+
+    let tar_xz_file = std::fs::File::open(archive_path).map_err(|e| {
+        NetworkError::OperationFailed(format!("Failed to open archive: {e}"))
+    })?;
+
+    let decoder = xz2::read::XzDecoder::new(tar_xz_file);
+    let mut archive = tar::Archive::new(decoder);
+
+    let entries = archive.entries().map_err(|e| {
+        NetworkError::OperationFailed(format!("Invalid tar archive: {e}"))
+    })?;
+
+    for entry_result in entries {
+        let mut entry = entry_result.map_err(|e| {
+            NetworkError::OperationFailed(format!("Failed to read tar entry: {e}"))
+        })?;
+
+        let path = entry.path().map_err(|e| {
+            NetworkError::OperationFailed(format!("Invalid path in archive: {e}"))
+        })?
+        .to_path_buf();
+
+        let safe_path = sanitize_tar_path(&path)?;
+        if safe_path.is_empty() || safe_path.contains("..") {
+            continue;
+        }
+
+        let full_path = out_dir.join(&safe_path);
+
+        if entry.header().entry_type().is_dir() {
+            std::fs::create_dir_all(&full_path).map_err(|e| {
+                NetworkError::OperationFailed(format!("Failed to create directory: {e}"))
+            })?;
+        } else {
+            if let Some(parent) = full_path.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| {
+                    NetworkError::OperationFailed(format!("Failed to create directory: {e}"))
+                })?;
+            }
+
+            entry.unpack(&full_path).map_err(|e| {
+                NetworkError::OperationFailed(format!("Failed to extract file: {e}"))
+            })?;
+        }
+    }
+
+    Ok(())
 }
 
 /// Install a plain binary (not an archive)
