@@ -246,12 +246,16 @@ impl Database {
         asset_filename: &str,
         checksum: Option<&str>,
         installed_binaries: Option<&str>,
+        is_managed: bool,
+        install_path: &str,
     ) -> Result<(), DatabaseError> {
         sqlx::query(
             r#"
             UPDATE installed
             SET version = ?, asset_filename = ?, checksum = ?,
-                installed_binaries = COALESCE(?, installed_binaries),
+                installed_binaries = ?,
+                is_managed = ?,
+                install_path = ?,
                 last_checked = strftime('%s', 'now')
             WHERE id = ?
             "#,
@@ -260,6 +264,24 @@ impl Database {
         .bind(asset_filename)
         .bind(checksum)
         .bind(installed_binaries)
+        .bind(is_managed)
+        .bind(install_path)
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
+    /// Touch the last_checked timestamp for a package
+    pub async fn update_last_checked(&self, id: i64) -> Result<(), DatabaseError> {
+        sqlx::query(
+            r#"
+            UPDATE installed
+            SET last_checked = strftime('%s', 'now')
+            WHERE id = ?
+            "#,
+        )
         .bind(id)
         .execute(&self.pool)
         .await?;

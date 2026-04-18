@@ -628,7 +628,7 @@ async fn cmd_search(
 }
 
 /// Sync package database (refresh only)
-async fn cmd_sync_refresh(config: &Config, _default_forge: Forge) -> Result<()> {
+async fn cmd_sync_refresh(config: &Config, default_forge: Forge) -> Result<()> {
     println!("{}", "Synchronizing package database...".bold());
 
     let db_path = config.paths.install_root.join("state.sqlite");
@@ -655,11 +655,23 @@ async fn cmd_sync_refresh(config: &Config, _default_forge: Forge) -> Result<()> 
     let mut up_to_date = 0;
     let mut available_updates = 0;
     let mut orphaned = 0;
+    let mut skipped = 0;
+
+    let now = chrono::Utc::now().timestamp();
 
     for pkg in &active_packages {
-        let forge: Forge = pkg.forge.parse().unwrap_or(Forge::GitHub);
+        let forge: Forge = pkg.forge.parse().unwrap_or(default_forge);
 
         print!("  {:<35} ", pkg.package_ref());
+
+        // Smart-polling: skip if checked recently
+        if let Some(last) = pkg.last_checked {
+            if now - last < (config.upgrade.check_interval_hours as i64) * 3600 {
+                println!("{}", "skipped (recently checked)".dimmed());
+                skipped += 1;
+                continue;
+            }
+        }
 
         let provider = match registry.get_provider(&forge) {
             Ok(p) => p,
@@ -671,6 +683,9 @@ async fn cmd_sync_refresh(config: &Config, _default_forge: Forge) -> Result<()> 
 
         match provider.latest_release(&pkg.owner, &pkg.repo).await {
             Ok(release) => {
+                if let Some(id) = pkg.id {
+                    db.update_last_checked(id).await.ok();
+                }
                 if release.tag == pkg.version {
                     println!("{}", "up to date".green());
                     up_to_date += 1;
@@ -680,6 +695,9 @@ async fn cmd_sync_refresh(config: &Config, _default_forge: Forge) -> Result<()> 
                 }
             }
             Err(grel_providers::ProviderError::NotFound(_)) => {
+                if let Some(id) = pkg.id {
+                    db.mark_orphaned(id).await.ok();
+                }
                 println!("{}", "orphaned".red());
                 orphaned += 1;
             }
@@ -698,6 +716,9 @@ async fn cmd_sync_refresh(config: &Config, _default_forge: Forge) -> Result<()> 
     }
     if orphaned > 0 {
         println!("  Orphaned:         {orphaned}");
+    }
+    if skipped > 0 {
+        println!("  Skipped:          {skipped} (within check interval)");
     }
 
     db.close().await;
@@ -772,6 +793,8 @@ async fn cmd_upgrade(
     let mut orphaned = Vec::new();
     let mut errors = Vec::new();
 
+    let now = chrono::Utc::now().timestamp();
+
     for pkg in &active_packages {
         let forge: Forge = pkg.forge.parse().unwrap_or(default_forge);
         let pkg_ref_str = format!("{}/{}", pkg.owner, pkg.repo);
@@ -783,6 +806,14 @@ async fn cmd_upgrade(
                 continue;
             }
         };
+
+        // Smart-polling: skip if checked recently
+        if let Some(last) = pkg.last_checked {
+            if now - last < (config.upgrade.check_interval_hours as i64) * 3600 {
+                up_to_date.push(pkg_ref_str);
+                continue;
+            }
+        }
 
         // Fetch latest release
         let release = match provider.latest_release(&pkg.owner, &pkg.repo).await {
@@ -804,6 +835,9 @@ async fn cmd_upgrade(
         // Check if there's an update
         if release.tag == pkg.version && release.assets.iter().any(|a| a.filename == pkg.asset_filename) {
             up_to_date.push(pkg_ref_str.clone());
+            if let Some(id) = pkg.id {
+                db.update_last_checked(id).await.ok();
+            }
             continue;
         }
 
@@ -826,7 +860,19 @@ async fn cmd_upgrade(
             grel_core::SelectionResult::MultipleAssets(assets) => assets.into_iter().next().unwrap(),
         };
 
+        let is_managed = is_asset_managed(&chosen_asset, &config.assets);
         let renamed = chosen_asset.filename != pkg.asset_filename;
+
+        if !is_managed {
+            eprintln!(
+                "  {}",
+                format!(
+                    "⚠️  {pkg_ref_str}: new asset \"{}\" is unmanaged (requires manual installation)",
+                    chosen_asset.filename
+                )
+                .yellow()
+            );
+        }
 
         upgrades.push((
             pkg.clone(),
@@ -834,6 +880,7 @@ async fn cmd_upgrade(
             chosen_asset,
             renamed,
             forge,
+            is_managed,
         ));
     }
 
@@ -852,18 +899,24 @@ async fn cmd_upgrade(
             "{}",
             format!("{} package(s) to upgrade:", upgrades.len()).bold()
         );
-        for (pkg, release, asset, renamed, _) in &upgrades {
+        for (pkg, release, asset, renamed, _, is_managed) in &upgrades {
             let rename_note = if *renamed {
                 format!(" (asset renamed: {} → {})", pkg.asset_filename, asset.filename)
             } else {
                 String::new()
             };
+            let managed_note = if !is_managed {
+                " ⚠️ unmanaged".to_string()
+            } else {
+                String::new()
+            };
             println!(
-                "  {} {} → {}{}",
+                "  {} {} → {}{}{}",
                 format!("{}/{}", pkg.owner, pkg.repo).bold(),
                 pkg.version,
                 release.tag,
                 rename_note,
+                managed_note,
             );
         }
         println!();
@@ -896,13 +949,13 @@ async fn cmd_upgrade(
     let mut upgraded = 0;
     let mut failed = 0;
 
-    for (pkg, release, asset, renamed, forge) in &upgrades {
+    for (pkg, release, asset, renamed, forge, is_managed) in &upgrades {
         let pkg_ref_str = format!("{}/{}", pkg.owner, pkg.repo);
         print!("  {} {pkg_ref_str} {} → {} ... ", "→".cyan(), pkg.version, release.tag);
 
         match upgrade_single_package(
             &db, &client, pkg, release.clone(), asset.clone(), *renamed,
-            config, *forge,
+            config, *forge, *is_managed,
         ).await {
             Ok(_) => {
                 println!("{}", "ok".green());
@@ -943,8 +996,9 @@ async fn upgrade_single_package(
     renamed: bool,
     config: &Config,
     _forge: Forge,
+    is_managed: bool,
 ) -> Result<()> {
-    let install_dir = if pkg.is_managed {
+    let install_dir = if is_managed {
         config.paths.install_root.join(format!(
             "{}/{}/{}",
             pkg.forge, pkg.owner, pkg.repo
@@ -960,18 +1014,39 @@ async fn upgrade_single_package(
         anyhow::anyhow!("Failed to create directory: {e}")
     })?;
 
-    // Download new asset
+    // Download new asset to a temp file for atomicity
+    let temp_path = archive_path.with_extension("part");
     let checksum = grel_network::download::download_file(
         client,
         &asset.url,
-        &archive_path,
+        &temp_path,
         None,
     )
     .await
     .with_context(|| format!("Failed to download {}", asset.filename))?;
 
-    // If managed, extract and install
-    if pkg.is_managed {
+    // Atomically rename temp file to final
+    std::fs::rename(&temp_path, &archive_path)
+        .map_err(|e| anyhow::anyhow!("Failed to rename downloaded file: {e}"))?;
+
+    // Build updated package record
+    let mut updated_pkg = pkg.clone();
+    updated_pkg.version = release.tag.clone();
+    updated_pkg.asset_filename = asset.filename.clone();
+    updated_pkg.checksum = Some(checksum.clone());
+    updated_pkg.is_managed = is_managed;
+    updated_pkg.install_path = install_dir.to_string_lossy().to_string();
+    updated_pkg.last_checked = Some(chrono::Utc::now().timestamp());
+    updated_pkg.status = models::PackageStatus::Active;
+
+    if is_managed {
+        // Clean old extraction directory so new extraction starts fresh
+        let extracted_dir = install_dir.join("extracted");
+        if extracted_dir.exists() {
+            std::fs::remove_dir_all(&extracted_dir)
+                .map_err(|e| anyhow::anyhow!("Failed to clean old extraction directory: {e}"))?;
+        }
+
         match grel_network::archive::install_asset(
             &archive_path,
             &install_dir,
@@ -984,28 +1059,49 @@ async fn upgrade_single_package(
                     .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
                     .collect();
 
-                // Update DB with new version, asset, checksum, and binaries
-                if let Some(id) = pkg.id {
-                    let bins = if bin_filenames.is_empty() { None } else { Some(bin_filenames.join(";")) };
-                    db.update_package(id, &release.tag, &asset.filename, Some(&checksum), bins.as_deref()).await?;
+                updated_pkg.set_binary_list(bin_filenames.clone());
+
+                // Remove old binaries that are no longer present in the new release
+                let old_bins: std::collections::HashSet<String> = pkg.binary_list().into_iter().collect();
+                let new_bins: std::collections::HashSet<String> = bin_filenames.into_iter().collect();
+                for stale_bin in old_bins.difference(&new_bins) {
+                    let stale_path = config.paths.bin_dir.join(stale_bin);
+                    if stale_path.exists() {
+                        std::fs::remove_file(&stale_path).ok();
+                    }
                 }
             }
             Err(e) => {
                 return Err(anyhow::anyhow!("Failed to extract: {e}"));
             }
         }
+    } else {
+        // Unmanaged: no extraction, clear binary list
+        updated_pkg.set_binary_list(vec![]);
 
-        // Clean up old archive if renamed
-        if renamed {
-            let old_archive = install_dir.join(&pkg.asset_filename);
-            if old_archive.exists() && old_archive != archive_path {
-                std::fs::remove_file(&old_archive).ok();
+        // If transitioning from managed → unmanaged, clean up old managed files
+        if pkg.is_managed {
+            let old_install_dir = config.paths.install_root.join(format!(
+                "{}/{}/{}",
+                pkg.forge, pkg.owner, pkg.repo
+            ));
+            if old_install_dir.exists() {
+                std::fs::remove_dir_all(&old_install_dir).ok();
+            }
+            for old_bin in pkg.binary_list() {
+                let old_path = config.paths.bin_dir.join(&old_bin);
+                if old_path.exists() {
+                    std::fs::remove_file(&old_path).ok();
+                }
             }
         }
-    } else {
-        // Unmanaged: just update DB
-        if let Some(id) = pkg.id {
-            db.update_package(id, &release.tag, &asset.filename, Some(&checksum), None).await?;
+    }
+
+    // Clean up old archive if renamed
+    if renamed {
+        let old_archive = std::path::Path::new(&pkg.install_path).join(&pkg.asset_filename);
+        if old_archive.exists() && old_archive != archive_path {
+            std::fs::remove_file(&old_archive).ok();
         }
     }
 
@@ -1013,6 +1109,11 @@ async fn upgrade_single_package(
     if !config.general.keep_archives && archive_path.exists() {
         std::fs::remove_file(&archive_path).ok();
     }
+
+    // Atomically update the full package record in DB
+    db.upsert_package(&updated_pkg)
+        .await
+        .with_context(|| "Failed to update package record")?;
 
     Ok(())
 }
