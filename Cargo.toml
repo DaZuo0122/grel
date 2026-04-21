@@ -10,6 +10,10 @@ description = "A package manager for pre-built binaries from Git forges"
 name = "grel"
 path = "src/main.rs"
 
+[profile.release]
+lto = true
+codegen-units = 1
+
 [dependencies]
 grel-cli = { path = "crates/grel-cli" }
 grel-core = { path = "crates/grel-core" }
