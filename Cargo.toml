@@ -13,6 +13,9 @@ path = "src/main.rs"
 [profile.release]
 lto = true
 codegen-units = 1
+panic = "abort"
+strip = true
+debug = false
 
 [dependencies]
 grel-cli = { path = "crates/grel-cli" }
