@@ -144,7 +144,10 @@ mod tests {
         assert_eq!("linux".parse::<Os>().unwrap(), Os::Linux);
         assert_eq!("win64".parse::<Os>().unwrap(), Os::Windows);
         assert_eq!("darwin".parse::<Os>().unwrap(), Os::MacOS);
-        assert_eq!("foobar".parse::<Os>().unwrap(), Os::Unknown("foobar".into()));
+        assert_eq!(
+            "foobar".parse::<Os>().unwrap(),
+            Os::Unknown("foobar".into())
+        );
     }
 
     #[test]
@@ -152,6 +155,9 @@ mod tests {
         assert_eq!("x86_64".parse::<Arch>().unwrap(), Arch::X86_64);
         assert_eq!("amd64".parse::<Arch>().unwrap(), Arch::X86_64);
         assert_eq!("arm64".parse::<Arch>().unwrap(), Arch::Aarch64);
-        assert_eq!("foobar".parse::<Arch>().unwrap(), Arch::Unknown("foobar".into()));
+        assert_eq!(
+            "foobar".parse::<Arch>().unwrap(),
+            Arch::Unknown("foobar".into())
+        );
     }
 }

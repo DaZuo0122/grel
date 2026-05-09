@@ -1,7 +1,7 @@
 //! Release provider trait definition.
 
 use async_trait::async_trait;
-use grel_core::{RemoteAsset, AssetTokens};
+use grel_core::{AssetTokens, RemoteAsset};
 
 use crate::github::GitHubRelease;
 
@@ -39,11 +39,7 @@ pub enum ProviderType {
 #[async_trait]
 pub trait ReleaseProvider: Send + Sync {
     /// Get the latest release for a repository
-    async fn latest_release(
-        &self,
-        owner: &str,
-        repo: &str,
-    ) -> Result<Release, ProviderError>;
+    async fn latest_release(&self, owner: &str, repo: &str) -> Result<Release, ProviderError>;
 
     /// Get a specific release by tag
     async fn get_release(
@@ -62,6 +58,18 @@ pub trait ReleaseProvider: Send + Sync {
 
     /// Get the provider type
     fn provider_type(&self) -> ProviderType;
+
+    /// Fetch a raw file from the repository's default branch.
+    ///
+    /// Used to retrieve `.grel.toml` manifests directly from repos.
+    /// `ref_name` is typically `"HEAD"` or a branch name like `"main"`.
+    async fn fetch_raw_file(
+        &self,
+        owner: &str,
+        repo: &str,
+        path: &str,
+        ref_name: &str,
+    ) -> Result<String, ProviderError>;
 }
 
 /// Provider errors
@@ -93,10 +101,8 @@ impl Release {
             .assets
             .into_iter()
             .map(|asset| {
-                let tokens = AssetTokens::from_filename_with_tag(
-                    &asset.name,
-                    Some(&release.tag_name),
-                );
+                let tokens =
+                    AssetTokens::from_filename_with_tag(&asset.name, Some(&release.tag_name));
                 RemoteAsset {
                     filename: asset.name.clone(),
                     url: asset.browser_download_url,

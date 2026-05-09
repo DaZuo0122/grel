@@ -10,6 +10,17 @@ pub enum PackageStatus {
     Migrated,
 }
 
+/// Source of the manifest used during installation
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ManifestSource {
+    /// From the central registry
+    Registry,
+    /// From `.grel.toml` in the upstream repo
+    InRepo,
+    /// Heuristic filename resolution (no manifest)
+    Heuristic,
+}
+
 impl std::fmt::Display for PackageStatus {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -27,6 +38,26 @@ impl PackageStatus {
             "orphaned" => PackageStatus::Orphaned,
             "migrated" => PackageStatus::Migrated,
             _ => PackageStatus::Active,
+        }
+    }
+}
+
+impl std::fmt::Display for ManifestSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ManifestSource::Registry => write!(f, "registry"),
+            ManifestSource::InRepo => write!(f, "in_repo"),
+            ManifestSource::Heuristic => write!(f, "heuristic"),
+        }
+    }
+}
+
+impl ManifestSource {
+    pub fn from_str(s: &str) -> Self {
+        match s {
+            "registry" => ManifestSource::Registry,
+            "in_repo" => ManifestSource::InRepo,
+            _ => ManifestSource::Heuristic,
         }
     }
 }
@@ -60,6 +91,8 @@ pub struct InstalledPackage {
     pub orphaned_at: Option<i64>,
     pub last_checked: Option<i64>,
     pub installed_at: Option<i64>,
+    pub manifest_source: ManifestSource,
+    pub is_explicit: bool,
 }
 
 impl InstalledPackage {
@@ -80,6 +113,8 @@ impl InstalledPackage {
             orphaned_at: None,
             last_checked: None,
             installed_at: None,
+            manifest_source: ManifestSource::Heuristic,
+            is_explicit: true,
         }
     }
 
@@ -103,6 +138,45 @@ impl InstalledPackage {
     /// Set the list of installed binary filenames
     pub fn set_binary_list(&mut self, binaries: Vec<String>) {
         self.installed_binaries = binaries.join(";");
+    }
+}
+
+/// A dependency relationship between packages
+#[derive(Debug, Clone)]
+pub struct Dependency {
+    pub id: Option<i64>,
+    pub package_id: i64,
+    pub dep_forge: String,
+    pub dep_owner: String,
+    pub dep_repo: String,
+    pub dep_type: DependencyType,
+}
+
+/// Type of dependency
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DependencyType {
+    Grel,
+    GrelOpt,
+    System,
+}
+
+impl std::fmt::Display for DependencyType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DependencyType::Grel => write!(f, "grel"),
+            DependencyType::GrelOpt => write!(f, "grel_opt"),
+            DependencyType::System => write!(f, "system"),
+        }
+    }
+}
+
+impl DependencyType {
+    pub fn from_str(s: &str) -> Self {
+        match s {
+            "grel_opt" => DependencyType::GrelOpt,
+            "system" => DependencyType::System,
+            _ => DependencyType::Grel,
+        }
     }
 }
 

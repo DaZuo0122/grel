@@ -159,9 +159,18 @@ fn strip_extension(basename: &str, format: &str) -> String {
             .or_else(|| basename.strip_suffix(".tgz"))
             .unwrap_or(basename)
             .to_string(),
-        "tar.xz" => basename.strip_suffix(".tar.xz").unwrap_or(basename).to_string(),
-        "tar.bz2" => basename.strip_suffix(".tar.bz2").unwrap_or(basename).to_string(),
-        "tar.zst" => basename.strip_suffix(".tar.zst").unwrap_or(basename).to_string(),
+        "tar.xz" => basename
+            .strip_suffix(".tar.xz")
+            .unwrap_or(basename)
+            .to_string(),
+        "tar.bz2" => basename
+            .strip_suffix(".tar.bz2")
+            .unwrap_or(basename)
+            .to_string(),
+        "tar.zst" => basename
+            .strip_suffix(".tar.zst")
+            .unwrap_or(basename)
+            .to_string(),
         other if other != "unknown" => {
             let ext = format!(".{other}");
             basename.strip_suffix(&ext).unwrap_or(basename).to_string()
@@ -275,10 +284,7 @@ fn try_parse_version(token: &str) -> Option<String> {
 
     // Two-part X.Y (not valid semver, but common in release filenames).
     let parts: Vec<&str> = s.splitn(3, '.').collect();
-    if parts.len() == 2
-        && parts[0].parse::<u64>().is_ok()
-        && parts[1].parse::<u64>().is_ok()
-    {
+    if parts.len() == 2 && parts[0].parse::<u64>().is_ok() && parts[1].parse::<u64>().is_ok() {
         return Some(s.to_string());
     }
 
@@ -342,10 +348,8 @@ mod tests {
 
     #[test]
     fn test_filename_version_takes_priority() {
-        let t = AssetTokens::from_filename_with_tag(
-            "tool-v3.0.0-linux-x86_64.tar.gz",
-            Some("v2.0.0"),
-        );
+        let t =
+            AssetTokens::from_filename_with_tag("tool-v3.0.0-linux-x86_64.tar.gz", Some("v2.0.0"));
         assert_eq!(t.version, Some("3.0.0".into()));
     }
 
@@ -435,8 +439,7 @@ mod tests {
     #[test]
     fn test_musl_variant_musleabihf() {
         // musleabihf is the musl hard-float ARM ABI token
-        let t =
-            AssetTokens::from_filename("tool-14.0.0-arm-unknown-linux-musleabihf.tar.gz");
+        let t = AssetTokens::from_filename("tool-14.0.0-arm-unknown-linux-musleabihf.tar.gz");
         assert!(t.is_musl, "musleabihf should set is_musl");
         assert_eq!(t.arch, Arch::ArmV7);
     }
@@ -464,10 +467,8 @@ mod tests {
     #[test]
     fn test_tag_with_prefix() {
         // Tag "release-14.1.1" should still yield version "14.1.1"
-        let t = AssetTokens::from_filename_with_tag(
-            "tool-linux-x86_64.tar.gz",
-            Some("release-14.1.1"),
-        );
+        let t =
+            AssetTokens::from_filename_with_tag("tool-linux-x86_64.tar.gz", Some("release-14.1.1"));
         assert_eq!(t.version, Some("14.1.1".into()));
     }
 
@@ -490,9 +491,8 @@ mod tests {
     #[test]
     fn test_sha256_checksum_file_detected() {
         // "foo.tar.gz.sha256" must be recognised as format "sha256"
-        let t = AssetTokens::from_filename(
-            "ripgrep-14.1.1-x86_64-unknown-linux-musl.tar.gz.sha256",
-        );
+        let t =
+            AssetTokens::from_filename("ripgrep-14.1.1-x86_64-unknown-linux-musl.tar.gz.sha256");
         assert_eq!(t.format, "sha256");
     }
 

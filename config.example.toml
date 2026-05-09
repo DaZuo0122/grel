@@ -30,5 +30,13 @@ github_token = ""                # Use env $GREL_GITHUB_TOKEN instead
 gitlab_token = ""                # Use env $GREL_GITLAB_TOKEN instead
 gitea_token = ""                 # Use env $GREL_GITEA_TOKEN instead
 
+[security]
+verify_signatures = false            # Verify detached signatures/checksums on assets
+                                     # When true, grel refuses to install unsigned assets
+
+[registry]
+url = "https://github.com/grel-registry/packages"  # Central manifest registry git URL
+auto_update = true                                 # Auto-fetch registry on sync operations
+
 [migrations]
 # "old/owner/repo" = "new/owner/repo"

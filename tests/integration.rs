@@ -3,10 +3,12 @@
 //! These tests require network access and a valid GitHub API rate limit.
 //! Run with: `cargo test --test integration` to include them.
 
-use grel_core::{Os, Arch, PackageRef, Forge, resolve_assets, SelectionResult, ResolverConfig, SelectionPolicy};
+use grel_config::GeneralConfig;
+use grel_core::{
+    Arch, Forge, Os, PackageRef, ResolverConfig, SelectionPolicy, SelectionResult, resolve_assets,
+};
 use grel_network::{build_http_client, download};
 use grel_providers::{ProviderRegistry, ReleaseProvider};
-use grel_config::GeneralConfig;
 
 fn make_client() -> reqwest::Client {
     build_http_client(&GeneralConfig::default()).expect("failed to build HTTP client")
@@ -29,11 +31,22 @@ async fn search_repos_returns_results() {
         .get_provider(&Forge::GitHub)
         .expect("GitHub provider");
 
-    let results = provider.search_repos("ripgrep", 5).await.expect("search should succeed");
-    assert!(!results.is_empty(), "expected at least one result for 'ripgrep'");
+    let results = provider
+        .search_repos("ripgrep", 5)
+        .await
+        .expect("search should succeed");
+    assert!(
+        !results.is_empty(),
+        "expected at least one result for 'ripgrep'"
+    );
 
-    let found = results.iter().any(|r| r.owner == "BurntSushi" && r.repo == "ripgrep");
-    assert!(found, "expected BurntSushi/ripgrep in search results for 'ripgrep'");
+    let found = results
+        .iter()
+        .any(|r| r.owner == "BurntSushi" && r.repo == "ripgrep");
+    assert!(
+        found,
+        "expected BurntSushi/ripgrep in search results for 'ripgrep'"
+    );
 }
 
 #[tokio::test]
@@ -43,8 +56,15 @@ async fn search_repos_respects_max_results() {
         .get_provider(&Forge::GitHub)
         .expect("GitHub provider");
 
-    let results = provider.search_repos("rust", 3).await.expect("search should succeed");
-    assert!(results.len() <= 3, "expected at most 3 results, got {}", results.len());
+    let results = provider
+        .search_repos("rust", 3)
+        .await
+        .expect("search should succeed");
+    assert!(
+        results.len() <= 3,
+        "expected at most 3 results, got {}",
+        results.len()
+    );
 }
 
 #[tokio::test]
@@ -54,7 +74,10 @@ async fn search_repopulates_description() {
         .get_provider(&Forge::GitHub)
         .expect("GitHub provider");
 
-    let results = provider.search_repos("ripgrep", 1).await.expect("search should succeed");
+    let results = provider
+        .search_repos("ripgrep", 1)
+        .await
+        .expect("search should succeed");
     assert!(!results.is_empty());
     assert!(!results[0].owner.is_empty());
     assert!(!results[0].repo.is_empty());
@@ -77,7 +100,10 @@ async fn latest_release_has_assets() {
         .expect("should find latest release");
 
     assert!(!release.tag.is_empty());
-    assert!(!release.assets.is_empty(), "ripgrep release should have assets");
+    assert!(
+        !release.assets.is_empty(),
+        "ripgrep release should have assets"
+    );
     assert!(release.assets.iter().any(|a| !a.url.is_empty()));
 }
 
@@ -106,9 +132,24 @@ async fn latest_release_nonexistent_returns_not_found() {
 fn default_resolver_config() -> ResolverConfig {
     ResolverConfig {
         default_selection_policy: SelectionPolicy::First,
-        exclude_keywords: vec!["setup".into(), "installer".into(), "bundle".into(), "nupkg".into()],
-        ignore_formats: vec!["*.deb".into(), "*.rpm".into(), "*.msi".into(), "*.dmg".into()],
-        prefer_formats: vec!["*.tar.gz".into(), "*.tar.xz".into(), "*.zip".into(), "*.exe".into()],
+        exclude_keywords: vec![
+            "setup".into(),
+            "installer".into(),
+            "bundle".into(),
+            "nupkg".into(),
+        ],
+        ignore_formats: vec![
+            "*.deb".into(),
+            "*.rpm".into(),
+            "*.msi".into(),
+            "*.dmg".into(),
+        ],
+        prefer_formats: vec![
+            "*.tar.gz".into(),
+            "*.tar.xz".into(),
+            "*.zip".into(),
+            "*.exe".into(),
+        ],
         prefer_32bit_on_64bit: false,
         fallback_to_32bit: true,
         prefer_musl: false,
@@ -131,13 +172,7 @@ async fn resolve_selects_compatible_asset() {
     let host_os = Os::host();
     let host_arch = Arch::host();
 
-    let selection = resolve_assets(
-        &release.assets,
-        &host_os,
-        &host_arch,
-        &config,
-        false,
-    );
+    let selection = resolve_assets(&release.assets, &host_os, &host_arch, &config, false);
 
     match selection {
         SelectionResult::SingleAsset(asset) => {
@@ -161,15 +196,13 @@ async fn download_small_file_succeeds() {
     let tmp_dir = std::env::temp_dir().join("grel-test-download");
     let dest = tmp_dir.join("test.txt");
 
-    let result = download::download_file(
-        &client,
-        "https://httpbin.org/get",
-        &dest,
-        None,
-    )
-    .await;
+    let result = download::download_file(&client, "https://httpbin.org/get", &dest, None).await;
 
-    assert!(result.is_ok(), "download should succeed: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "download should succeed: {:?}",
+        result.err()
+    );
     assert!(dest.exists(), "destination file should exist");
 
     let _ = std::fs::remove_file(&dest);

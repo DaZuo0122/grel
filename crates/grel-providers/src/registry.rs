@@ -3,11 +3,11 @@
 use grel_core::Forge;
 use reqwest::Client;
 
-use crate::trait_def::{ProviderError, ProviderType, ReleaseProvider};
+use crate::codeberg::CodebergProvider;
+use crate::gitea::GiteaProvider;
 use crate::github::GitHubProvider;
 use crate::gitlab::GitLabProvider;
-use crate::gitea::GiteaProvider;
-use crate::codeberg::CodebergProvider;
+use crate::trait_def::{ProviderError, ProviderType, ReleaseProvider};
 
 /// Registry of release providers
 pub struct ProviderRegistry {

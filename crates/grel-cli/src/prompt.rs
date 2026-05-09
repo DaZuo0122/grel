@@ -57,7 +57,11 @@ pub fn select_from_list(prompt: &str, options: &[String]) -> Option<usize> {
     let mut input = String::new();
     io::stdin().read_line(&mut input).unwrap();
 
-    input.trim().parse::<usize>().ok().filter(|&n| n > 0 && n <= options.len())
+    input
+        .trim()
+        .parse::<usize>()
+        .ok()
+        .filter(|&n| n > 0 && n <= options.len())
 }
 
 /// Check if running in interactive terminal
@@ -84,4 +88,3 @@ pub fn format_size(bytes: u64) -> String {
         format!("{:.1} {}", size, units[unit_idx])
     }
 }
-

@@ -1,7 +1,9 @@
 ## 📐 Command Syntax
+
 ```
 grel <OPERATION> [OPTIONS] [TARGETS...]
 ```
+
 Operations are mutually exclusive. Options can be combined without spaces (e.g., `-Syu`).
 
 ---
@@ -9,6 +11,7 @@ Operations are mutually exclusive. Options can be combined without spaces (e.g.,
 ## 🧩 Operation & Option Reference
 
 ### `-S, --sync` (Fetch & Install from Forges)
+
 | Flag | Long | Description |
 |------|------|-------------|
 | `-s` | `--search <pattern>` | Search registered forges for packages |
@@ -23,6 +26,8 @@ Operations are mutually exclusive. Options can be combined without spaces (e.g.,
 | `--platform <os/arch>` | | Override host platform detection (e.g., `linux/aarch64`) |
 | `--exclude-keywords <k1,k2>` | | Temporarily add keywords to exclusion list |
 | `--allow-format <fmt>` | | Temporarily allow normally ignored formats |
+| `--asdeps` | | Install packages as non-explicit (dependency) |
+| `--asexplicit` | | Install packages as explicitly installed |
 
 **Common Combos:**
 - `grel -S foo/bar` → Install latest
@@ -32,35 +37,47 @@ Operations are mutually exclusive. Options can be combined without spaces (e.g.,
 - `grel -Syu` → Refresh + Upgrade (standard update)
 - `grel -Ssc` → Search + Clean cache
 - `grel -Si foo/bar` → Show remote release info
+- `grel -S --asdeps foo/bar` → Install as dependency
 
 ---
 
 ### `-Q, --query` (Inspect Local State)
+
 | Flag | Long | Description |
 |------|------|-------------|
-| `-l` | `--list` | List all installed packages |
+| (none) | | List all installed packages |
+| `-l` | `--list [<pkg>]` | List files owned by an installed package (no arg = all packages) |
 | `-i` | `--info <pkg>` | Show detailed info of an installed package |
 | `-o` | `--owns <path>` | Find which package owns a binary/file |
 | `-q` | `--quiet` | Output minimal data (package names only) |
 | `-e` | `--explicit` | Filter to manually installed packages |
+| `-d` | `--deps` | Filter to packages installed as dependencies |
+| `-t` | `--unrequired` | Show packages not required by any other (orphans) |
 | `-k` | `--check` | Verify checksums of installed binaries |
-| `--orphans` | | Show packages marked `orphaned` in DB |
+| `-s` | `--search <pattern>` | Search locally installed packages by name |
 
 **Common Combos:**
-- `grel -Ql` → List installed
+- `grel -Q` → List installed
+- `grel -Ql` → List files for all packages
+- `grel -Ql foo/bar` → List files owned by foo/bar
 - `grel -Qi foo/bar` → Show local install info
 - `grel -Qo rg` → Which package provides `rg`?
 - `grel -Qeq` → List explicitly installed, quiet mode
+- `grel -Qd` → List dependency-installed packages
+- `grel -Qt` → List orphan packages
 - `grel -Qk` → Verify checksums of all installed packages
+- `grel -Qs ripgrep` → Search installed packages for "ripgrep"
 
 ---
 
 ### `-R, --remove` (Uninstall)
+
 | Flag | Long | Description |
 |------|------|-------------|
 | `-c` | `--cascade` | Remove package + unneeded dependencies |
 | `-n` | `--nosave` | Do not preserve extracted files/config backups |
 | `-s` | `--recursive` | Remove packages that depend on the target |
+| `-u` | `--unneeded` | Remove packages that are no longer required |
 | `--noconfirm` | | Skip removal confirmation |
 | `--dry-run` | | Show what would be removed |
 
@@ -68,10 +85,12 @@ Operations are mutually exclusive. Options can be combined without spaces (e.g.,
 - `grel -R foo/bar` → Uninstall
 - `grel -Rcns foo/bar` → Cascade + Recursive + Nosave
 - `grel -Rn foo/bar` → Remove, keep extracted binaries
+- `grel -Ru` → Remove all unneeded packages
 
 ---
 
 ### `-D, --database` (Local DB & State Management)
+
 | Flag | Long | Description |
 |------|------|-------------|
 | `--asexplicit <pkg>` | | Mark package as manually installed |
@@ -89,6 +108,7 @@ Operations are mutually exclusive. Options can be combined without spaces (e.g.,
 ---
 
 ### `-U, --upgrade` (Install from Local File)
+
 | Flag | Long | Description |
 |------|------|-------------|
 | `--overwrite` | | Overwrite conflicting binaries |
@@ -102,6 +122,7 @@ Operations are mutually exclusive. Options can be combined without spaces (e.g.,
 ---
 
 ### `-F, --files` (File Index & Binary Search)
+
 | Flag | Long | Description |
 |------|------|-------------|
 | `-s` | `--search <pattern>` | Search installed packages for a filename/binary |
@@ -117,6 +138,7 @@ Operations are mutually exclusive. Options can be combined without spaces (e.g.,
 ---
 
 ## 🔀 Option Combining & Precedence Rules
+
 1. **Stacking:** `-Syu` ≡ `-S -y -u`. Flags can be merged without spaces.
 2. **Operation First:** The first `-D/-Q/-R/-S/-U/-F` determines the operation. Subsequent operation flags are ignored.
 3. **Override Hierarchy:**
@@ -131,6 +153,7 @@ Operations are mutually exclusive. Options can be combined without spaces (e.g.,
 ---
 
 ## 🧠 Internal Mapping to Crates
+
 | CLI Layer | Routes To |
 |-----------|-----------|
 | `-S/-U` | `grel-cli` → `grel-core/resolver` → `grel-network/download` → `grel-cache/install` |
@@ -143,6 +166,7 @@ Operations are mutually exclusive. Options can be combined without spaces (e.g.,
 ---
 
 ## 📝 Example Workflows
+
 ```bash
 # Standard update cycle
 grel -Syu
@@ -151,8 +175,8 @@ grel -Syu
 grel -Ss "fd find"
 grel -S sharkdp/fd --asset fd-v10.1.0-x86_64-unknown-linux-musl.tar.gz
 
-# Force 32-bit on 64-bit host, skip prompts
-grel -Su --prefer-32bit --noconfirm
+# Install as dependency (for use by other packages)
+grel -S --asdeps github/cli
 
 # Clean everything, refresh metadata, reinstall
 grel -D --clean
@@ -162,6 +186,13 @@ grel -Syu
 # Migrate renamed repo, verify checksums
 grel -D --migrate old-org/tool new-org/tool
 grel -Qk
-```
 
-This design preserves pacman's muscle memory, strictly separates operations, supports flag combining, and maps cleanly to `grel`'s deterministic, forge-agnostic architecture. Ready for `clap` derivation and command routing.
+# List files owned by a package
+grel -Ql sharkdp/fd
+
+# Search installed packages
+grel -Qs ripgrep
+
+# Remove unneeded packages
+grel -Ru
+```

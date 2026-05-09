@@ -143,7 +143,10 @@ async fn update_last_checked_touches_timestamp() {
         .expect("package exists");
 
     let new_ts = updated.last_checked.expect("timestamp set");
-    assert!(new_ts > 1000, "last_checked should be updated to a recent timestamp");
+    assert!(
+        new_ts > 1000,
+        "last_checked should be updated to a recent timestamp"
+    );
 
     db.close().await;
     cleanup(&tmp);
@@ -197,11 +200,20 @@ async fn upgrade_single_package_cleans_old_binaries() {
     }
 
     // bin-v1 should be removed (not in new list)
-    assert!(!bin_dir.join("bin-v1").exists(), "stale binary should be removed");
+    assert!(
+        !bin_dir.join("bin-v1").exists(),
+        "stale binary should be removed"
+    );
     // bin-v2 should stay (in both old and new)
-    assert!(bin_dir.join("bin-v2").exists(), "retained binary should stay");
+    assert!(
+        bin_dir.join("bin-v2").exists(),
+        "retained binary should stay"
+    );
     // bin-v3 should stay (unrelated third-party binary)
-    assert!(bin_dir.join("bin-v3").exists(), "unrelated binary should stay");
+    assert!(
+        bin_dir.join("bin-v3").exists(),
+        "unrelated binary should stay"
+    );
 
     db.close().await;
     cleanup(&tmp);

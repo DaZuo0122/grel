@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use reqwest::Client;
 use serde::Deserialize;
 
-use crate::trait_def::{ProviderError, Release, ReleaseProvider, ProviderType, SearchResult};
+use crate::trait_def::{ProviderError, ProviderType, Release, ReleaseProvider, SearchResult};
 use grel_core::AssetTokens;
 
 /// Codeberg API base URL
@@ -37,11 +37,7 @@ impl CodebergProvider {
 
 #[async_trait]
 impl ReleaseProvider for CodebergProvider {
-    async fn latest_release(
-        &self,
-        owner: &str,
-        repo: &str,
-    ) -> Result<Release, ProviderError> {
+    async fn latest_release(&self, owner: &str, repo: &str) -> Result<Release, ProviderError> {
         let url = self.api_url(&format!("/repos/{owner}/{repo}/releases/latest"));
         let builder = self.client.get(&url);
         let builder = self.add_auth_header(builder);
@@ -49,9 +45,7 @@ impl ReleaseProvider for CodebergProvider {
         let response = builder.send().await?;
 
         if response.status() == 404 {
-            return Err(ProviderError::NotFound(format!(
-                "{owner}/{repo} not found"
-            )));
+            return Err(ProviderError::NotFound(format!("{owner}/{repo} not found")));
         }
 
         let release: ForgejoRelease = response.json().await?;
@@ -116,6 +110,32 @@ impl ReleaseProvider for CodebergProvider {
 
     fn provider_type(&self) -> ProviderType {
         ProviderType::Codeberg
+    }
+
+    async fn fetch_raw_file(
+        &self,
+        owner: &str,
+        repo: &str,
+        path: &str,
+        ref_name: &str,
+    ) -> Result<String, ProviderError> {
+        let url = format!("https://codeberg.org/{owner}/{repo}/raw/branch/{ref_name}/{path}");
+        let builder = self.client.get(&url);
+        let builder = self.add_auth_header(builder);
+
+        let response = builder.send().await?;
+
+        if response.status() == 404 {
+            return Err(ProviderError::NotFound(format!(
+                "File {path} not found in {owner}/{repo}"
+            )));
+        }
+
+        let text = response
+            .text()
+            .await
+            .map_err(|e| ProviderError::ApiError(format!("Failed to read raw file: {e}")))?;
+        Ok(text)
     }
 }
 

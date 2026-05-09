@@ -45,9 +45,8 @@ pub fn install_asset(
     bin_dir: &Path,
     asset_filename: &str,
 ) -> Result<InstallResult, NetworkError> {
-    std::fs::create_dir_all(install_dir).map_err(|e| {
-        NetworkError::OperationFailed(format!("Failed to create install dir: {e}"))
-    })?;
+    std::fs::create_dir_all(install_dir)
+        .map_err(|e| NetworkError::OperationFailed(format!("Failed to create install dir: {e}")))?;
 
     let ext = extract_extension(asset_filename);
 
@@ -64,7 +63,9 @@ pub fn install_asset(
             extract_tar_xz(archive_path, install_dir)?;
             link_binaries(install_dir, bin_dir, asset_filename)
         }
-        ArchiveType::Plain => install_plain_binary(archive_path, install_dir, bin_dir, asset_filename),
+        ArchiveType::Plain => {
+            install_plain_binary(archive_path, install_dir, bin_dir, asset_filename)
+        }
     }
 }
 
@@ -96,17 +97,14 @@ fn extract_extension(filename: &str) -> ArchiveType {
 /// Extract a zip archive into `<install_dir>/extracted/`
 fn extract_zip(archive_path: &Path, install_dir: &Path) -> Result<(), NetworkError> {
     let out_dir = install_dir.join("extracted");
-    std::fs::create_dir_all(&out_dir).map_err(|e| {
-        NetworkError::OperationFailed(format!("Failed to create extract dir: {e}"))
-    })?;
+    std::fs::create_dir_all(&out_dir)
+        .map_err(|e| NetworkError::OperationFailed(format!("Failed to create extract dir: {e}")))?;
 
-    let archive_file = std::fs::File::open(archive_path).map_err(|e| {
-        NetworkError::OperationFailed(format!("Failed to open archive: {e}"))
-    })?;
+    let archive_file = std::fs::File::open(archive_path)
+        .map_err(|e| NetworkError::OperationFailed(format!("Failed to open archive: {e}")))?;
 
-    let mut archive = zip::ZipArchive::new(archive_file).map_err(|e| {
-        NetworkError::OperationFailed(format!("Invalid zip archive: {e}"))
-    })?;
+    let mut archive = zip::ZipArchive::new(archive_file)
+        .map_err(|e| NetworkError::OperationFailed(format!("Invalid zip archive: {e}")))?;
 
     for i in 0..archive.len() {
         let mut file = archive.by_index(i).map_err(|e| {
@@ -149,30 +147,27 @@ fn extract_zip(archive_path: &Path, install_dir: &Path) -> Result<(), NetworkErr
 /// Extract a tar.gz archive into `<install_dir>/extracted/`
 fn extract_tar_gz(archive_path: &Path, install_dir: &Path) -> Result<(), NetworkError> {
     let out_dir = install_dir.join("extracted");
-    std::fs::create_dir_all(&out_dir).map_err(|e| {
-        NetworkError::OperationFailed(format!("Failed to create extract dir: {e}"))
-    })?;
+    std::fs::create_dir_all(&out_dir)
+        .map_err(|e| NetworkError::OperationFailed(format!("Failed to create extract dir: {e}")))?;
 
-    let tar_gz_file = std::fs::File::open(archive_path).map_err(|e| {
-        NetworkError::OperationFailed(format!("Failed to open archive: {e}"))
-    })?;
+    let tar_gz_file = std::fs::File::open(archive_path)
+        .map_err(|e| NetworkError::OperationFailed(format!("Failed to open archive: {e}")))?;
 
     let decoder = flate2::read::GzDecoder::new(tar_gz_file);
     let mut archive = tar::Archive::new(decoder);
 
-    let entries = archive.entries().map_err(|e| {
-        NetworkError::OperationFailed(format!("Invalid tar archive: {e}"))
-    })?;
+    let entries = archive
+        .entries()
+        .map_err(|e| NetworkError::OperationFailed(format!("Invalid tar archive: {e}")))?;
 
     for entry_result in entries {
-        let mut entry = entry_result.map_err(|e| {
-            NetworkError::OperationFailed(format!("Failed to read tar entry: {e}"))
-        })?;
+        let mut entry = entry_result
+            .map_err(|e| NetworkError::OperationFailed(format!("Failed to read tar entry: {e}")))?;
 
-        let path = entry.path().map_err(|e| {
-            NetworkError::OperationFailed(format!("Invalid path in archive: {e}"))
-        })?
-        .to_path_buf();
+        let path = entry
+            .path()
+            .map_err(|e| NetworkError::OperationFailed(format!("Invalid path in archive: {e}")))?
+            .to_path_buf();
 
         let safe_path = sanitize_tar_path(&path)?;
         if safe_path.is_empty() || safe_path.contains("..") {
@@ -204,30 +199,27 @@ fn extract_tar_gz(archive_path: &Path, install_dir: &Path) -> Result<(), Network
 /// Extract a tar.xz archive into `<install_dir>/extracted/`
 fn extract_tar_xz(archive_path: &Path, install_dir: &Path) -> Result<(), NetworkError> {
     let out_dir = install_dir.join("extracted");
-    std::fs::create_dir_all(&out_dir).map_err(|e| {
-        NetworkError::OperationFailed(format!("Failed to create extract dir: {e}"))
-    })?;
+    std::fs::create_dir_all(&out_dir)
+        .map_err(|e| NetworkError::OperationFailed(format!("Failed to create extract dir: {e}")))?;
 
-    let tar_xz_file = std::fs::File::open(archive_path).map_err(|e| {
-        NetworkError::OperationFailed(format!("Failed to open archive: {e}"))
-    })?;
+    let tar_xz_file = std::fs::File::open(archive_path)
+        .map_err(|e| NetworkError::OperationFailed(format!("Failed to open archive: {e}")))?;
 
     let decoder = xz2::read::XzDecoder::new(tar_xz_file);
     let mut archive = tar::Archive::new(decoder);
 
-    let entries = archive.entries().map_err(|e| {
-        NetworkError::OperationFailed(format!("Invalid tar archive: {e}"))
-    })?;
+    let entries = archive
+        .entries()
+        .map_err(|e| NetworkError::OperationFailed(format!("Invalid tar archive: {e}")))?;
 
     for entry_result in entries {
-        let mut entry = entry_result.map_err(|e| {
-            NetworkError::OperationFailed(format!("Failed to read tar entry: {e}"))
-        })?;
+        let mut entry = entry_result
+            .map_err(|e| NetworkError::OperationFailed(format!("Failed to read tar entry: {e}")))?;
 
-        let path = entry.path().map_err(|e| {
-            NetworkError::OperationFailed(format!("Invalid path in archive: {e}"))
-        })?
-        .to_path_buf();
+        let path = entry
+            .path()
+            .map_err(|e| NetworkError::OperationFailed(format!("Invalid path in archive: {e}")))?
+            .to_path_buf();
 
         let safe_path = sanitize_tar_path(&path)?;
         if safe_path.is_empty() || safe_path.contains("..") {
@@ -264,17 +256,14 @@ fn install_plain_binary(
     filename: &str,
 ) -> Result<InstallResult, NetworkError> {
     // Ensure both directories exist before writing into them.
-    std::fs::create_dir_all(install_dir).map_err(|e| {
-        NetworkError::OperationFailed(format!("Failed to create install dir: {e}"))
-    })?;
-    std::fs::create_dir_all(bin_dir).map_err(|e| {
-        NetworkError::OperationFailed(format!("Failed to create bin dir: {e}"))
-    })?;
+    std::fs::create_dir_all(install_dir)
+        .map_err(|e| NetworkError::OperationFailed(format!("Failed to create install dir: {e}")))?;
+    std::fs::create_dir_all(bin_dir)
+        .map_err(|e| NetworkError::OperationFailed(format!("Failed to create bin dir: {e}")))?;
 
     let dest = install_dir.join(filename);
-    std::fs::copy(source_path, &dest).map_err(|e| {
-        NetworkError::OperationFailed(format!("Failed to copy binary: {e}"))
-    })?;
+    std::fs::copy(source_path, &dest)
+        .map_err(|e| NetworkError::OperationFailed(format!("Failed to copy binary: {e}")))?;
 
     // Make target executable on Unix before linking, so the link inherits the bit.
     make_executable(&dest)?;
@@ -298,9 +287,8 @@ fn link_binaries(
     _archive_name: &str,
 ) -> Result<InstallResult, NetworkError> {
     // Ensure bin_dir exists before we attempt to create any links inside it.
-    std::fs::create_dir_all(bin_dir).map_err(|e| {
-        NetworkError::OperationFailed(format!("Failed to create bin dir: {e}"))
-    })?;
+    std::fs::create_dir_all(bin_dir)
+        .map_err(|e| NetworkError::OperationFailed(format!("Failed to create bin dir: {e}")))?;
 
     let extracted = install_dir.join("extracted");
     let mut installed = Vec::new();
@@ -340,12 +328,11 @@ fn collect_binaries(
     bin_dir: &Path,
     installed: &mut Vec<PathBuf>,
 ) -> Result<(), NetworkError> {
-    for entry in std::fs::read_dir(dir).map_err(|e| {
-        NetworkError::OperationFailed(format!("Failed to read directory: {e}"))
-    })? {
-        let entry = entry.map_err(|e| {
-            NetworkError::OperationFailed(format!("Failed to read dir entry: {e}"))
-        })?;
+    for entry in std::fs::read_dir(dir)
+        .map_err(|e| NetworkError::OperationFailed(format!("Failed to read directory: {e}")))?
+    {
+        let entry = entry
+            .map_err(|e| NetworkError::OperationFailed(format!("Failed to read dir entry: {e}")))?;
         let path = entry.path();
 
         if path.is_dir() {
@@ -486,9 +473,8 @@ fn make_executable(path: &Path) -> Result<(), NetworkError> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let meta = std::fs::metadata(path).map_err(|e| {
-            NetworkError::OperationFailed(format!("Failed to read metadata: {e}"))
-        })?;
+        let meta = std::fs::metadata(path)
+            .map_err(|e| NetworkError::OperationFailed(format!("Failed to read metadata: {e}")))?;
         let mut perms = meta.permissions();
         perms.set_mode(perms.mode() | 0o111);
         std::fs::set_permissions(path, perms).map_err(|e| {
@@ -583,9 +569,9 @@ mod tests {
         // Files with non-executable extensions are never selected
         assert!(!is_executable_name(Path::new("readme.md")));
         assert!(!is_executable_name(Path::new("config.json")));
-        assert!(!is_executable_name(Path::new("rg.1")));        // man page
+        assert!(!is_executable_name(Path::new("rg.1"))); // man page
         assert!(!is_executable_name(Path::new("data.csv")));
-        assert!(!is_executable_name(Path::new("lib.so")));      // shared lib
+        assert!(!is_executable_name(Path::new("lib.so"))); // shared lib
         assert!(!is_executable_name(Path::new("arch.tar.gz"))); // nested ext
     }
 
@@ -652,7 +638,10 @@ mod tests {
         let mut perms = std::fs::metadata(&license_path).unwrap().permissions();
         perms.set_mode(0o644);
         std::fs::set_permissions(&license_path, perms).unwrap();
-        assert!(!is_executable(&license_path), "UNLICENSE has no exec bit → skipped");
+        assert!(
+            !is_executable(&license_path),
+            "UNLICENSE has no exec bit → skipped"
+        );
 
         // A shell-completion script (_rg) without the execute bit → skipped.
         let comp_path = dir.path().join("_rg");
@@ -660,7 +649,10 @@ mod tests {
         let mut perms = std::fs::metadata(&comp_path).unwrap().permissions();
         perms.set_mode(0o644);
         std::fs::set_permissions(&comp_path, perms).unwrap();
-        assert!(!is_executable(&comp_path), "completion script (no exec bit) → skipped");
+        assert!(
+            !is_executable(&comp_path),
+            "completion script (no exec bit) → skipped"
+        );
     }
 
     // ── path-traversal rejection ─────────────────────────────────────────────
@@ -699,7 +691,11 @@ mod tests {
         }
 
         let result = link_binaries(&install_dir, &bin_dir, "mytool.tar.gz");
-        assert!(result.is_ok(), "link_binaries should not fail: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "link_binaries should not fail: {:?}",
+            result
+        );
         assert!(bin_dir.exists(), "bin_dir must be created by link_binaries");
     }
 }

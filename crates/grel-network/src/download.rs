@@ -35,9 +35,9 @@ pub async fn download_file(
     }
 
     let mut stream = response.bytes_stream();
-    let mut file = tokio::fs::File::create(dest).await.map_err(|e| {
-        NetworkError::OperationFailed(format!("Failed to create file: {e}"))
-    })?;
+    let mut file = tokio::fs::File::create(dest)
+        .await
+        .map_err(|e| NetworkError::OperationFailed(format!("Failed to create file: {e}")))?;
 
     let mut hasher = Sha256::new();
     let mut downloaded = 0;
@@ -45,9 +45,9 @@ pub async fn download_file(
     while let Some(chunk) = stream.next().await {
         let chunk = chunk?;
         hasher.update(&chunk);
-        file.write_all(&chunk).await.map_err(|e| {
-            NetworkError::OperationFailed(format!("Failed to write file: {e}"))
-        })?;
+        file.write_all(&chunk)
+            .await
+            .map_err(|e| NetworkError::OperationFailed(format!("Failed to write file: {e}")))?;
 
         downloaded += chunk.len() as u64;
         if let Some(pb) = progress_bar {
@@ -55,9 +55,9 @@ pub async fn download_file(
         }
     }
 
-    file.flush().await.map_err(|e| {
-        NetworkError::OperationFailed(format!("Failed to flush file: {e}"))
-    })?;
+    file.flush()
+        .await
+        .map_err(|e| NetworkError::OperationFailed(format!("Failed to flush file: {e}")))?;
 
     let checksum = format!("{:x}", hasher.finalize());
     Ok(checksum)

@@ -5,15 +5,21 @@
 //! - Asset tokenization from filenames
 //! - Deterministic filter/sort pipeline
 
-mod platform;
 mod asset;
-mod resolver;
+mod dependency;
+mod manifest;
 mod package_ref;
+mod platform;
+mod registry;
+mod resolver;
 
-pub use platform::*;
 pub use asset::*;
-pub use resolver::*;
+pub use dependency::*;
+pub use manifest::*;
 pub use package_ref::*;
+pub use platform::*;
+pub use registry::*;
+pub use resolver::*;
 
 // Re-export for external use
 pub use asset::detect_version_from_tag;

@@ -1,0 +1,421 @@
+//! Query commands (-Q operation)
+
+use anyhow::{Context, Result};
+use grel_cache::models;
+use grel_config::Config;
+use grel_core::{Forge, PackageRef};
+use owo_colors::OwoColorize;
+
+use crate::commands::CommandContext;
+
+/// List installed packages
+pub async fn cmd_list(ctx: &CommandContext<'_>) -> Result<()> {
+    let db = ctx.db().await?;
+    let packages = db.list_packages().await?;
+
+    let quiet = ctx.cli.quiet;
+    let explicit_only = ctx.cli.explicit;
+    let deps_only = ctx.cli.deps_filter;
+
+    if quiet {
+        for pkg in &packages {
+            if explicit_only && !pkg.is_explicit {
+                continue;
+            }
+            if deps_only && pkg.is_explicit {
+                continue;
+            }
+            println!("{}", pkg.package_ref());
+        }
+        db.close().await;
+        return Ok(());
+    }
+
+    if packages.is_empty() {
+        println!("No packages installed.");
+        println!("\nInstall your first package with:");
+        println!("  grel -S owner/repo");
+        db.close().await;
+        return Ok(());
+    }
+
+    let active_count = packages
+        .iter()
+        .filter(|p| matches!(p.status, models::PackageStatus::Active))
+        .count();
+    let orphaned_count = packages
+        .iter()
+        .filter(|p| matches!(p.status, models::PackageStatus::Orphaned))
+        .count();
+
+    println!(
+        "{}",
+        format!("Installed packages ({active_count} active, {orphaned_count} orphaned)").bold()
+    );
+    println!();
+
+    for pkg in &packages {
+        if explicit_only && !pkg.is_explicit {
+            continue;
+        }
+        if deps_only && pkg.is_explicit {
+            continue;
+        }
+
+        let status_icon = match pkg.status {
+            models::PackageStatus::Active => "green",
+            models::PackageStatus::Orphaned => "yellow",
+            models::PackageStatus::Migrated => "white",
+        };
+
+        let managed_tag = if pkg.is_managed {
+            "managed"
+        } else {
+            "unmanaged"
+        };
+        let explicit_tag = if pkg.is_explicit { "explicit" } else { "dep" };
+
+        print!(
+            "  [{status_icon}] {:<30} {:<12} {:<10} {:<8} {}",
+            pkg.package_ref(),
+            format!("v{}", pkg.version),
+            managed_tag,
+            explicit_tag,
+            pkg.status,
+        );
+
+        if pkg.status == models::PackageStatus::Orphaned {
+            if let Some(orphaned_at) = pkg.orphaned_at {
+                let dt = chrono::DateTime::<chrono::Utc>::from_timestamp(orphaned_at, 0);
+                if let Some(dt) = dt {
+                    print!(" (since {})", dt.format("%Y-%m-%d"));
+                }
+            }
+        }
+
+        println!();
+    }
+
+    db.close().await;
+    Ok(())
+}
+
+/// List files owned by a package (or all packages)
+pub async fn cmd_list_files(ctx: &CommandContext<'_>, pkg_filter: Option<&str>) -> Result<()> {
+    let db = ctx.db().await?;
+    let packages = db.list_packages().await?;
+    let quiet = ctx.cli.quiet;
+
+    let targets: Vec<_> = if let Some(filter) = pkg_filter {
+        packages
+            .into_iter()
+            .filter(|p| {
+                let short = p.package_ref();
+                short == filter || short.contains(filter)
+            })
+            .collect()
+    } else {
+        packages
+    };
+
+    if targets.is_empty() {
+        if let Some(f) = pkg_filter {
+            println!("No package matches '{}'", f);
+        } else {
+            println!("No packages installed.");
+        }
+        db.close().await;
+        return Ok(());
+    }
+
+    for pkg in &targets {
+        let install_path = std::path::Path::new(&pkg.install_path);
+        if !install_path.exists() {
+            if !quiet {
+                eprintln!("  {}: install path not found", pkg.package_ref());
+            }
+            continue;
+        }
+
+        if quiet {
+            for entry in walkdir(install_path)? {
+                println!("{}", entry.display());
+            }
+        } else {
+            println!("{} {}", pkg.package_ref().bold(), install_path.display());
+            for entry in walkdir(install_path)? {
+                println!("  {}", entry.display());
+            }
+        }
+    }
+
+    db.close().await;
+    Ok(())
+}
+
+/// Walk a directory recursively, returning all file paths
+fn walkdir(path: &std::path::Path) -> Result<Vec<std::path::PathBuf>> {
+    let mut result = Vec::new();
+    if path.is_file() {
+        result.push(path.to_path_buf());
+        return Ok(result);
+    }
+    for entry in std::fs::read_dir(path)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_dir() {
+            result.extend(walkdir(&path)?);
+        } else {
+            result.push(path);
+        }
+    }
+    Ok(result)
+}
+
+/// List orphaned packages
+pub async fn cmd_list_orphans(ctx: &CommandContext<'_>) -> Result<()> {
+    let db = ctx.db().await?;
+    let packages = db.list_packages().await?;
+    let orphans: Vec<_> = packages
+        .into_iter()
+        .filter(|p| matches!(p.status, models::PackageStatus::Orphaned))
+        .collect();
+
+    if orphans.is_empty() {
+        println!("No orphaned packages.");
+        db.close().await;
+        return Ok(());
+    }
+
+    if ctx.cli.quiet {
+        for pkg in &orphans {
+            println!("{}", pkg.package_ref());
+        }
+    } else {
+        println!(
+            "{}",
+            format!("Orphaned packages ({})", orphans.len()).bold()
+        );
+        println!();
+        for pkg in &orphans {
+            print!("  {:<30} v{}", pkg.package_ref(), pkg.version);
+            if let Some(orphaned_at) = pkg.orphaned_at {
+                let dt = chrono::DateTime::<chrono::Utc>::from_timestamp(orphaned_at, 0);
+                if let Some(dt) = dt {
+                    print!(" (since {})", dt.format("%Y-%m-%d"));
+                }
+            }
+            println!();
+        }
+    }
+
+    db.close().await;
+    Ok(())
+}
+
+/// Show local package info
+pub async fn cmd_info_local(ctx: &CommandContext<'_>, pkg_ref_str: String) -> Result<()> {
+    let db = ctx.db().await?;
+
+    let pkg_ref = PackageRef::parse_with_forge(&pkg_ref_str, Forge::GitHub)
+        .with_context(|| format!("Invalid package reference: {pkg_ref_str}"))?;
+
+    let pkg = db
+        .get_package(&pkg_ref.forge.to_string(), &pkg_ref.owner, &pkg_ref.repo)
+        .await?;
+
+    let Some(pkg) = pkg else {
+        eprintln!(
+            "{}",
+            format!("Package not found: {}", pkg_ref.to_short_ref()).red()
+        );
+        db.close().await;
+        return Ok(());
+    };
+
+    println!("{}", format!("Package: {}", pkg.package_ref()).bold());
+    println!("  Version:       {}", pkg.version);
+    println!("  Status:        {}", pkg.status);
+    println!("  Managed:       {}", pkg.is_managed);
+    println!("  Explicit:      {}", pkg.is_explicit);
+    println!("  Asset:         {}", pkg.asset_filename);
+    println!("  Install path:  {}", pkg.install_path);
+
+    if let Some(checksum) = &pkg.checksum {
+        println!("  SHA256:        {checksum}");
+    }
+
+    db.close().await;
+    Ok(())
+}
+
+/// Show remote package info
+pub async fn cmd_info_remote(ctx: &CommandContext<'_>, pkg_ref_str: String) -> Result<()> {
+    let pkg_ref = PackageRef::parse_with_forge(&pkg_ref_str, ctx.default_forge())
+        .with_context(|| format!("Invalid package reference: {pkg_ref_str}"))?;
+
+    let client = grel_network::build_http_client(&Config::default().general)?;
+    let github_token = std::env::var("GREL_GITHUB_TOKEN").ok();
+    let registry = grel_providers::ProviderRegistry::new(client, github_token);
+
+    let provider = registry
+        .get_provider(&pkg_ref.forge)
+        .with_context(|| format!("Provider for {} not available", pkg_ref.forge))?;
+
+    let release = provider
+        .latest_release(&pkg_ref.owner, &pkg_ref.repo)
+        .await?;
+
+    println!(
+        "{}",
+        format!("Package: {}/{}", pkg_ref.owner, pkg_ref.repo).bold()
+    );
+    println!("  Latest:        {}", release.tag);
+    println!("  Name:          {}", &release.name);
+    if !release.description.is_empty() {
+        println!("  Description:   {}", release.description);
+    }
+    if release.prerelease {
+        println!("  Pre-release:   yes");
+    }
+    println!("  Assets:        {}", release.assets.len());
+
+    Ok(())
+}
+
+/// Find which package owns a file
+pub async fn cmd_owns(ctx: &CommandContext<'_>, path: String) -> Result<()> {
+    let db = ctx.db().await?;
+    let packages = db.list_packages().await?;
+
+    let found: Vec<_> = packages
+        .iter()
+        .filter(|p| p.install_path.contains(&path) || p.asset_filename.contains(&path))
+        .collect();
+
+    if found.is_empty() {
+        println!("No package owns '{}'", path);
+    } else {
+        for pkg in found {
+            println!("{}", pkg.package_ref());
+        }
+    }
+
+    db.close().await;
+    Ok(())
+}
+
+/// Verify checksums of installed files
+pub async fn cmd_verify_checksums(ctx: &CommandContext<'_>) -> Result<()> {
+    let db = ctx.db().await?;
+    let packages = db.list_packages().await?;
+    let active: Vec<_> = packages
+        .into_iter()
+        .filter(|p| matches!(p.status, models::PackageStatus::Active) && p.checksum.is_some())
+        .collect();
+
+    if active.is_empty() {
+        println!("No packages with checksums to verify.");
+        db.close().await;
+        return Ok(());
+    }
+
+    println!("{}", "Verifying checksums...".bold());
+
+    let mut ok = 0;
+    let mut failed = 0;
+    let mut missing = 0;
+
+    for pkg in &active {
+        let archive_path = std::path::Path::new(&pkg.install_path).join(&pkg.asset_filename);
+
+        print!("  {:<35} ", pkg.package_ref());
+
+        if !archive_path.exists() {
+            println!("{}", "MISSING (archive deleted)".red());
+            missing += 1;
+            continue;
+        }
+
+        let computed = {
+            use sha2::Digest;
+            use std::io::Read;
+            let mut hasher = sha2::Sha256::new();
+            let mut file = std::fs::File::open(&archive_path)?;
+            let mut buf = [0u8; 65536];
+            loop {
+                let n = file.read(&mut buf)?;
+                if n == 0 {
+                    break;
+                }
+                hasher.update(&buf[..n]);
+            }
+            format!("{:x}", hasher.finalize())
+        };
+
+        if let Some(ref expected) = pkg.checksum {
+            if computed == *expected {
+                println!("{}", "OK".green());
+                ok += 1;
+            } else {
+                println!(
+                    "{}",
+                    format!("FAILED (expected: {})", &expected[..16]).red()
+                );
+                failed += 1;
+            }
+        }
+    }
+
+    println!();
+    println!("  Verified: {ok}");
+    if failed > 0 {
+        println!("  {}", format!("Failed: {failed}").red());
+    }
+    if missing > 0 {
+        println!("  {}", format!("Missing: {missing}").yellow());
+    }
+
+    db.close().await;
+    Ok(())
+}
+
+/// Search locally installed packages
+pub async fn cmd_local_search(ctx: &CommandContext<'_>, pattern: String) -> Result<()> {
+    let db = ctx.db().await?;
+    let packages = db.list_packages().await?;
+    let lower = pattern.to_lowercase();
+
+    let matches: Vec<_> = packages
+        .into_iter()
+        .filter(|p| {
+            p.package_ref().to_lowercase().contains(&lower)
+                || p.owner.to_lowercase().contains(&lower)
+                || p.repo.to_lowercase().contains(&lower)
+        })
+        .collect();
+
+    if matches.is_empty() {
+        println!("No packages match '{}'", pattern);
+        db.close().await;
+        return Ok(());
+    }
+
+    if ctx.cli.quiet {
+        for pkg in &matches {
+            println!("{}", pkg.package_ref());
+        }
+    } else {
+        println!(
+            "{}",
+            format!("Packages matching '{}' ({} found)", pattern, matches.len()).bold()
+        );
+        println!();
+        for pkg in &matches {
+            println!("  {:<30} v{}", pkg.package_ref(), pkg.version);
+        }
+    }
+
+    db.close().await;
+    Ok(())
+}

@@ -21,7 +21,12 @@ pub struct PackageRef {
 
 impl PackageRef {
     pub fn new(forge: Forge, owner: String, repo: String, version: Option<String>) -> Self {
-        Self { forge, owner, repo, version }
+        Self {
+            forge,
+            owner,
+            repo,
+            version,
+        }
     }
 
     /// Parse a reference string with an explicit default forge.
@@ -142,7 +147,9 @@ impl FromStr for Forge {
 /// Package reference errors
 #[derive(Debug, thiserror::Error)]
 pub enum PackageRefError {
-    #[error("Invalid package reference format: '{0}' (expected: forge/owner/repo or owner/repo, optionally with @version)")]
+    #[error(
+        "Invalid package reference format: '{0}' (expected: forge/owner/repo or owner/repo, optionally with @version)"
+    )]
     InvalidFormat(String),
 
     #[error("Unknown forge: '{0}' (supported: github, gitlab, gitea, codeberg)")]

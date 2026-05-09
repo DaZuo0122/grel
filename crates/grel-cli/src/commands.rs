@@ -29,7 +29,7 @@ use grel_core::Forge;
 ///   grel -Sy                     Refresh metadata
 ///   grel -Su                     Upgrade installed (cached)
 ///   grel -Syu                    Refresh + upgrade
-///   grel -Ql                     List installed
+///   grel -Ql                     List installed files
 ///   grel -Qi foo/bar             Show local package info
 ///   grel -R foo/bar              Remove a package
 #[derive(Parser, Debug)]
@@ -44,7 +44,6 @@ pub struct Cli {
     // -----------------------------------------------------------------------
     // Operation flags (mutually exclusive, first wins)
     // -----------------------------------------------------------------------
-
     /// -S, --sync: Fetch & install from forges
     #[arg(
         short = 'S', long = "sync", action = clap::ArgAction::SetTrue,
@@ -62,7 +61,8 @@ pub struct Cli {
         help = "Query installed packages",
         long_help = "Inspect local package state and installed files.\n\
                      Sub-options: -l (list), -i (info), -o (owns),\n\
-                     -q (quiet), -e (explicit), -k (check), --orphans"
+                     -q (quiet), -e (explicit), -k (check), -s (search),\n\
+                     -d (deps), -t (unrequired)"
     )]
     pub op_query: bool,
 
@@ -72,7 +72,7 @@ pub struct Cli {
         help = "Remove packages",
         long_help = "Uninstall packages from the system.\n\
                      Sub-options: -c (cascade), -n (nosave),\n\
-                     -s (recursive), --noconfirm, --dry-run"
+                     -s (recursive), -u (unneeded), --noconfirm, --dry-run"
     )]
     pub op_remove: bool,
 
@@ -107,14 +107,14 @@ pub struct Cli {
     // -----------------------------------------------------------------------
     // -S (sync) sub-options
     // -----------------------------------------------------------------------
-
-    /// -s: Search forges for packages
+    /// -s: Search forges for packages (with -S), local packages (with -Q), or files (with -F)
     #[arg(
-        short = 's', long = "search",
-        help = "Search forges for packages (use with -S)",
+        short = 's',
+        long = "search",
+        help = "Search (with -S: remote, with -Q: local, with -F: files)",
         value_name = "PATTERN"
     )]
-    pub sync_search: Option<String>,
+    pub search: Option<String>,
 
     /// -y: Refresh metadata / rebuild index
     #[arg(
@@ -123,22 +123,23 @@ pub struct Cli {
     )]
     pub refresh: bool,
 
-    /// -u: Sysupgrade
+    /// -u: Sysupgrade (with -S) or remove unneeded (with -R)
     #[arg(
         short = 'u', long, action = clap::ArgAction::SetTrue,
-        help = "Upgrade all installed packages (with -S)"
+        help = "Upgrade all installed (with -S) or remove unneeded (with -R)"
     )]
     pub sysupgrade: bool,
 
     /// -i: Show info (used with -S or -Q)
     #[arg(
-        short = 'i', long,
+        short = 'i',
+        long,
         help = "Show package info (with -S: remote, with -Q: local)",
         value_name = "PKG"
     )]
     pub info: Option<String>,
 
-    /// -c: Clean (used with -S or -R)
+    /// -c: Clean (used with -S) or cascade (used with -R)
     #[arg(
         short = 'c', long, action = clap::ArgAction::SetTrue,
         help = "Purge artifact cache (with -S) or cascade (with -R)"
@@ -148,18 +149,19 @@ pub struct Cli {
     // -----------------------------------------------------------------------
     // -Q (query) sub-options
     // -----------------------------------------------------------------------
-
-    /// -l: List (used with -Q or -F)
+    /// -l: List files (used with -Q or -F). Optional package name.
     #[arg(
-        short = 'l', long, action = clap::ArgAction::SetTrue,
-        help = "List packages (with -Q) or files (with -F <pkg>)",
+        short = 'l', long,
+        help = "List files (with -Q or -F). Optional package name.",
+        num_args = 0..=1,
         value_name = "PKG"
     )]
-    pub list: Option<String>,
+    pub list: Vec<String>,
 
     /// -o: Owns (used with -Q)
     #[arg(
-        short = 'o', long,
+        short = 'o',
+        long,
         help = "Find which package owns a file",
         value_name = "PATH"
     )]
@@ -179,6 +181,20 @@ pub struct Cli {
     )]
     pub explicit: bool,
 
+    /// -d: List packages installed as dependencies
+    #[arg(
+        short = 'd', long, action = clap::ArgAction::SetTrue,
+        help = "List packages installed as dependencies (with -Q)"
+    )]
+    pub deps_filter: bool,
+
+    /// -t: List unrequired (orphan) packages
+    #[arg(
+        short = 't', long, action = clap::ArgAction::SetTrue,
+        help = "List unrequired packages (with -Q)"
+    )]
+    pub unrequired: bool,
+
     /// -k: Check checksums
     #[arg(
         short = 'k', long, action = clap::ArgAction::SetTrue,
@@ -186,37 +202,17 @@ pub struct Cli {
     )]
     pub check: bool,
 
-    /// --orphans
+    /// --orphans (deprecated, use -t)
     #[arg(
         long, action = clap::ArgAction::SetTrue,
-        help = "Show orphaned packages (with -Q)"
+        help = "Show orphaned packages (with -Q)",
+        hide = true
     )]
     pub orphans: bool,
 
     // -----------------------------------------------------------------------
-    // -F (files) sub-options
-    // -----------------------------------------------------------------------
-
-    /// -s for files search
-    #[arg(
-        long = "file-search",
-        help = "Search installed packages for a filename (with -F)",
-        value_name = "PATTERN"
-    )]
-    pub file_search: Option<String>,
-
-    /// -l for files list (with -F <pkg>)
-    #[arg(
-        long = "file-list",
-        help = "List all files from a package (with -F)",
-        value_name = "PKG"
-    )]
-    pub file_list: Option<String>,
-
-    // -----------------------------------------------------------------------
     // -R (remove) sub-options
     // -----------------------------------------------------------------------
-
     /// -n: nosave
     #[arg(
         short = 'n', long, action = clap::ArgAction::SetTrue,
@@ -234,12 +230,19 @@ pub struct Cli {
     // -----------------------------------------------------------------------
     // -D (database) sub-options
     // -----------------------------------------------------------------------
+    /// --asexplicit: Mark packages as explicitly installed
+    #[arg(
+        long, action = clap::ArgAction::SetTrue,
+        help = "Mark target(s) as explicitly installed (with -D)"
+    )]
+    pub asexplicit: bool,
 
-    #[arg(long, value_name = "PKG")]
-    pub asexplicit: Option<String>,
-
-    #[arg(long, value_name = "PKG")]
-    pub asdeps: Option<String>,
+    /// --asdeps: Mark packages as dependencies
+    #[arg(
+        long, action = clap::ArgAction::SetTrue,
+        help = "Mark target(s) as dependencies (with -D)"
+    )]
+    pub asdeps: bool,
 
     #[arg(long, value_names = &["OLD", "NEW"], num_args = 2)]
     pub migrate: Option<Vec<String>>,
@@ -256,15 +259,13 @@ pub struct Cli {
     // -----------------------------------------------------------------------
     // -U (upgrade local) sub-options
     // -----------------------------------------------------------------------
-
     #[arg(long, value_name = "PATH")]
     pub local_asset: Option<String>,
 
     // -----------------------------------------------------------------------
     // Common/global options
     // -----------------------------------------------------------------------
-
-    /// Target packages (for -S, -R) or file path (for -U)
+    /// Target packages (for -S, -R, -D) or file path (for -U)
     #[arg(value_name = "TARGETS")]
     pub targets: Vec<String>,
 
@@ -311,6 +312,22 @@ pub struct Cli {
     /// --proxy
     #[arg(long)]
     pub proxy: Option<String>,
+
+    /// --verify-signatures
+    #[arg(long, action = clap::ArgAction::SetTrue)]
+    pub verify_signatures: bool,
+
+    /// --no-verify-signatures
+    #[arg(long, action = clap::ArgAction::SetTrue)]
+    pub no_verify_signatures: bool,
+
+    /// --registry <url>
+    #[arg(long, value_name = "URL")]
+    pub registry: Option<String>,
+
+    /// --no-registry
+    #[arg(long, action = clap::ArgAction::SetTrue)]
+    pub no_registry: bool,
 }
 
 /// Forge argument wrapper for clap integration

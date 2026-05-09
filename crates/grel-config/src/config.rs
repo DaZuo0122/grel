@@ -3,8 +3,8 @@
 use std::path::PathBuf;
 
 use figment::{
-    providers::{Env, Format, Toml, Serialized},
     Figment,
+    providers::{Env, Format, Serialized, Toml},
 };
 use serde::{Deserialize, Serialize};
 
@@ -22,6 +22,9 @@ pub const DEFAULT_MAX_CONCURRENT: usize = 4;
 /// Default max parallel checks for -Syu
 pub const DEFAULT_MAX_PARALLEL_CHECKS: usize = 10;
 
+/// Default registry URL
+pub const DEFAULT_REGISTRY_URL: &str = "https://github.com/grel-registry/packages";
+
 /// Main configuration structure
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -30,6 +33,8 @@ pub struct Config {
     pub paths: PathConfig,
     pub upgrade: UpgradeConfig,
     pub auth: AuthConfig,
+    pub security: SecurityConfig,
+    pub registry: RegistryConfig,
     #[serde(default)]
     pub migrations: std::collections::HashMap<String, String>,
 }
@@ -42,6 +47,8 @@ impl Default for Config {
             paths: PathConfig::default(),
             upgrade: UpgradeConfig::default(),
             auth: AuthConfig::default(),
+            security: SecurityConfig::default(),
+            registry: RegistryConfig::default(),
             migrations: std::collections::HashMap::new(),
         }
     }
@@ -281,6 +288,57 @@ pub struct AuthConfig {
     /// Use env $GREL_GITEA_TOKEN instead
     #[serde(default)]
     pub gitea_token: String,
+}
+
+/// Security settings
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SecurityConfig {
+    /// Verify cryptographic signatures on downloaded assets.
+    /// When true, grel will refuse to install assets that lack
+    /// a valid detached signature or checksum file.
+    #[serde(default = "default_verify_signatures")]
+    pub verify_signatures: bool,
+}
+
+impl Default for SecurityConfig {
+    fn default() -> Self {
+        Self {
+            verify_signatures: default_verify_signatures(),
+        }
+    }
+}
+
+fn default_verify_signatures() -> bool {
+    false
+}
+
+/// Registry configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RegistryConfig {
+    /// URL to the git repository serving as the central manifest registry.
+    #[serde(default = "default_registry_url")]
+    pub url: String,
+
+    /// Automatically update the registry index on sync operations.
+    #[serde(default = "default_registry_auto_update")]
+    pub auto_update: bool,
+}
+
+impl Default for RegistryConfig {
+    fn default() -> Self {
+        Self {
+            url: default_registry_url(),
+            auto_update: default_registry_auto_update(),
+        }
+    }
+}
+
+fn default_registry_url() -> String {
+    DEFAULT_REGISTRY_URL.to_string()
+}
+
+fn default_registry_auto_update() -> bool {
+    true
 }
 
 /// Load configuration from file, environment, and defaults

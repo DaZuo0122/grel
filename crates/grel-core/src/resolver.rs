@@ -158,10 +158,14 @@ pub fn resolve_assets(
         // 1. arch_priority index
         let arch_a = arch_priority_index(&a.tokens.arch, target_arch);
         let arch_b = arch_priority_index(&b.tokens.arch, target_arch);
-        arch_a.cmp(&arch_b)
+        arch_a
+            .cmp(&arch_b)
             // 2. prefer_formats index
-            .then(format_priority_index(&a.tokens.format, &config.prefer_formats)
-                .cmp(&format_priority_index(&b.tokens.format, &config.prefer_formats)))
+            .then(
+                format_priority_index(&a.tokens.format, &config.prefer_formats).cmp(
+                    &format_priority_index(&b.tokens.format, &config.prefer_formats),
+                ),
+            )
             // 3. Lexicographic filename
             .then(a.filename.cmp(&b.filename))
             // 4. Size descending
@@ -263,9 +267,7 @@ pub fn resolve_assets_detailed(
 ) -> Option<AssetSelection> {
     let filtered: Vec<RemoteAsset> = assets
         .iter()
-        .filter(|a| {
-            a.tokens.os == *target_os || matches!(a.tokens.os, Os::Unknown(_))
-        })
+        .filter(|a| a.tokens.os == *target_os || matches!(a.tokens.os, Os::Unknown(_)))
         .filter(|a| {
             arch_matches(
                 &a.tokens.arch,
@@ -277,9 +279,7 @@ pub fn resolve_assets_detailed(
         .filter(|a| {
             allow_keyword || !is_keyword_excluded(&a.tokens.filename, &config.exclude_keywords)
         })
-        .filter(|a| {
-            !is_format_ignored(&a.tokens.format, &config.ignore_formats)
-        })
+        .filter(|a| !is_format_ignored(&a.tokens.format, &config.ignore_formats))
         .cloned()
         .collect();
 
@@ -291,7 +291,8 @@ pub fn resolve_assets_detailed(
     sorted.sort_by(|a, b| {
         let arch_a = arch_priority_index(&a.tokens.arch, target_arch);
         let arch_b = arch_priority_index(&b.tokens.arch, target_arch);
-        arch_a.cmp(&arch_b)
+        arch_a
+            .cmp(&arch_b)
             .then(
                 format_priority_index(&a.tokens.format, &config.prefer_formats).cmp(
                     &format_priority_index(&b.tokens.format, &config.prefer_formats),
@@ -341,7 +342,10 @@ mod tests {
     #[test]
     fn test_keyword_exclusion() {
         assert!(is_keyword_excluded("tool-setup-1.0.exe", &["setup".into()]));
-        assert!(!is_keyword_excluded("tool-1.0-linux.tar.gz", &["setup".into()]));
+        assert!(!is_keyword_excluded(
+            "tool-1.0-linux.tar.gz",
+            &["setup".into()]
+        ));
     }
 
     #[test]
@@ -363,22 +367,12 @@ mod tests {
     #[test]
     fn test_arch_fallback() {
         // x86_64 target can fallback to i686
-        assert!(arch_matches(
-            &Arch::I686,
-            &Arch::X86_64,
-            true,
-            false
-        ));
+        assert!(arch_matches(&Arch::I686, &Arch::X86_64, true, false));
 
         // Without fallback, should not match
-        assert!(!arch_matches(
-            &Arch::I686,
-            &Arch::X86_64,
-            false,
-            false
-        ));
+        assert!(!arch_matches(&Arch::I686, &Arch::X86_64, false, false));
     }
-    
+
     fn test_config() -> ResolverConfig {
         ResolverConfig::default()
     }
