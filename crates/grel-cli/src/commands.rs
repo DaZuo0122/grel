@@ -328,6 +328,38 @@ pub struct Cli {
     /// --no-registry
     #[arg(long, action = clap::ArgAction::SetTrue)]
     pub no_registry: bool,
+
+    /// --auto-resolve-deps: enable ELF system dep resolution (overrides config)
+    #[arg(
+        long,
+        action = clap::ArgAction::SetTrue,
+        conflicts_with = "no_auto_resolve_deps"
+    )]
+    pub auto_resolve_deps: bool,
+
+    /// --no-auto-resolve-deps: disable ELF system dep resolution (overrides config)
+    #[arg(
+        long,
+        action = clap::ArgAction::SetTrue,
+        conflicts_with = "auto_resolve_deps"
+    )]
+    pub no_auto_resolve_deps: bool,
+
+    /// --show-parsed-deps: print DT_NEEDED libs after install (overrides config)
+    #[arg(
+        long,
+        action = clap::ArgAction::SetTrue,
+        conflicts_with = "no_show_parsed_deps"
+    )]
+    pub show_parsed_deps: bool,
+
+    /// --no-show-parsed-deps: suppress DT_NEEDED output (overrides config)
+    #[arg(
+        long,
+        action = clap::ArgAction::SetTrue,
+        conflicts_with = "show_parsed_deps"
+    )]
+    pub no_show_parsed_deps: bool,
 }
 
 /// Forge argument wrapper for clap integration

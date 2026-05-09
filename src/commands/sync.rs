@@ -13,6 +13,80 @@ use owo_colors::OwoColorize;
 
 use crate::commands::{CommandContext, format_size, is_asset_managed};
 
+/// Run ELF dependency resolution on newly installed binaries and offer to install missing ones.
+///
+/// Gracefully degrades: any failure just prints a warning and continues.
+#[cfg(target_os = "linux")]
+async fn check_elf_deps(bin_paths: &[std::path::PathBuf], ctx: &CommandContext<'_>, db: &Database) {
+    if !ctx.config.elf_deps.auto_resolve_system_deps || bin_paths.is_empty() {
+        return;
+    }
+
+    let report = grel_elf::resolve_elf_deps(bin_paths, &ctx.config.elf_deps, Some(db)).await;
+
+    if ctx.config.elf_deps.show_parsed_deps && !report.missing_libs.is_empty() {
+        println!(
+            "  {}",
+            format!(
+                "Missing system libraries: {}",
+                report.missing_libs.join(", ")
+            )
+            .yellow()
+        );
+    }
+
+    if report.unresolved_libs.len() > 0 {
+        for lib in &report.unresolved_libs {
+            println!(
+                "  {}",
+                format!("Could not resolve package for: {lib}").yellow()
+            );
+        }
+    }
+
+    let Some(install_cmd) = report.install_cmd else {
+        return;
+    };
+
+    let cmd_str = install_cmd.join(" ");
+    println!("  {}", format!("Suggested: {cmd_str}").cyan());
+
+    if ctx.cli.noconfirm {
+        run_install_cmd(&install_cmd);
+    } else if grel_cli::is_interactive() {
+        let accepted = grel_cli::ask_confirmation("Install missing system libraries?", false);
+        if accepted {
+            run_install_cmd(&install_cmd);
+        }
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+async fn check_elf_deps(
+    _bin_paths: &[std::path::PathBuf],
+    _ctx: &CommandContext<'_>,
+    _db: &Database,
+) {
+}
+
+#[cfg(target_os = "linux")]
+fn run_install_cmd(tokens: &[String]) {
+    if tokens.is_empty() {
+        return;
+    }
+    let status = std::process::Command::new(&tokens[0])
+        .args(&tokens[1..])
+        .status();
+    match status {
+        Ok(s) if s.success() => println!("  {}", "System libraries installed.".green()),
+        Ok(s) => eprintln!(
+            "  {}",
+            format!("Install command exited with status {s}").red()
+        ),
+        Err(e) => eprintln!("  {}", format!("Failed to run install command: {e}").red()),
+    }
+}
+
 /// Three-tier manifest lookup:
 /// 1. Central registry (local cache)
 /// 2. In-repo `.grel.toml` via raw content API
@@ -735,6 +809,8 @@ pub async fn cmd_sync(ctx: &CommandContext<'_>, packages: &[String]) -> Result<(
             .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
             .collect();
 
+        check_elf_deps(&installed_binaries, ctx, &db).await;
+
         if is_managed && !ctx.config.general.keep_archives && archive_path.exists() {
             std::fs::remove_file(&archive_path).ok();
             println!("  {}", "Cleaned up downloaded archive".dimmed());
@@ -1300,9 +1376,10 @@ pub async fn cmd_upgrade(ctx: &CommandContext<'_>) -> Result<()> {
         )
         .await
         {
-            Ok(_) => {
+            Ok(installed_bins) => {
                 println!("{}", "ok".green());
                 upgraded += 1;
+                check_elf_deps(&installed_bins, ctx, &db).await;
             }
             Err(e) => {
                 println!("{}", format!("FAILED: {e}").red());
@@ -1328,7 +1405,8 @@ pub async fn cmd_upgrade(ctx: &CommandContext<'_>) -> Result<()> {
     Ok(())
 }
 
-/// Upgrade a single package: download → extract → atomic replace → DB update
+/// Upgrade a single package: download → extract → atomic replace → DB update.
+/// Returns the installed binary paths for subsequent ELF dep checking.
 #[allow(clippy::too_many_arguments)]
 async fn upgrade_single_package(
     db: &Database,
@@ -1340,7 +1418,7 @@ async fn upgrade_single_package(
     config: &Config,
     _forge: Forge,
     is_managed: bool,
-) -> Result<()> {
+) -> Result<Vec<std::path::PathBuf>> {
     let install_dir = if is_managed {
         config
             .paths
@@ -1379,6 +1457,8 @@ async fn upgrade_single_package(
     updated_pkg.last_checked = Some(chrono::Utc::now().timestamp());
     updated_pkg.status = models::PackageStatus::Active;
 
+    let mut installed_bins: Vec<std::path::PathBuf> = vec![];
+
     if is_managed {
         let extracted_dir = install_dir.join("extracted");
         if extracted_dir.exists() {
@@ -1399,6 +1479,7 @@ async fn upgrade_single_package(
                     .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
                     .collect();
 
+                installed_bins = result.installed_binaries;
                 updated_pkg.set_binary_list(bin_filenames.clone());
 
                 let old_bins: std::collections::HashSet<String> =
@@ -1451,5 +1532,5 @@ async fn upgrade_single_package(
         .await
         .with_context(|| "Failed to update package record")?;
 
-    Ok(())
+    Ok(installed_bins)
 }

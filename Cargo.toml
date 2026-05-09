@@ -24,6 +24,7 @@ grel-config = { path = "crates/grel-config" }
 grel-cache = { path = "crates/grel-cache" }
 grel-network = { path = "crates/grel-network" }
 grel-providers = { path = "crates/grel-providers" }
+grel-elf = { path = "crates/grel-elf" }
 
 tokio.workspace = true
 clap.workspace = true
@@ -52,6 +53,7 @@ members = [
     "crates/grel-network",
     "crates/grel-cache",
     "crates/grel-config",
+    "crates/grel-elf",
 ]
 
 [workspace.package]
@@ -110,3 +112,4 @@ thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 dirs = "5"
+goblin = { version = "0.9", default-features = false, features = ["elf32", "elf64", "endian_fd"] }

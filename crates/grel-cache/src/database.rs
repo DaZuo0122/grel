@@ -62,7 +62,8 @@ impl Database {
                 orphaned_at INTEGER,
                 last_checked INTEGER,
                 installed_at INTEGER DEFAULT (strftime('%s', 'now')),
-                manifest_source TEXT NOT NULL DEFAULT 'heuristic' CHECK (manifest_source IN ('registry', 'in_repo', 'heuristic'))
+                manifest_source TEXT NOT NULL DEFAULT 'heuristic' CHECK (manifest_source IN ('registry', 'in_repo', 'heuristic')),
+                is_explicit BOOLEAN NOT NULL DEFAULT 1
             )
             "#,
         )
@@ -171,6 +172,21 @@ impl Database {
         .execute(pool)
         .await?;
 
+        // Create system dependency cache table
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS system_dep_cache (
+                library_name TEXT NOT NULL,
+                distro_id TEXT NOT NULL,
+                package_name TEXT NOT NULL,
+                discovered_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
+                PRIMARY KEY (library_name, distro_id)
+            )
+            "#,
+        )
+        .execute(pool)
+        .await?;
+
         Ok(())
     }
 
@@ -224,7 +240,7 @@ impl Database {
         let row = sqlx::query(
             r#"
             SELECT id, forge, owner, repo, version, asset_filename, checksum,
-                   install_path, installed_binaries, is_managed, status, orphaned_at, last_checked, installed_at, manifest_source
+                   install_path, installed_binaries, is_managed, status, orphaned_at, last_checked, installed_at, manifest_source, is_explicit
             FROM installed
             WHERE forge = ? AND owner = ? AND repo = ?
             "#,
@@ -243,7 +259,7 @@ impl Database {
         let rows = sqlx::query(
             r#"
             SELECT id, forge, owner, repo, version, asset_filename, checksum,
-                   install_path, installed_binaries, is_managed, status, orphaned_at, last_checked, installed_at, manifest_source
+                   install_path, installed_binaries, is_managed, status, orphaned_at, last_checked, installed_at, manifest_source, is_explicit
             FROM installed
             ORDER BY forge, owner, repo
             "#,
@@ -514,6 +530,48 @@ impl Database {
         .await?;
 
         Ok(rows.into_iter().map(Self::row_to_package).collect())
+    }
+
+    /// Look up a cached library → package mapping for the given distro.
+    pub async fn get_cached_system_dep(
+        &self,
+        lib: &str,
+        distro: &str,
+    ) -> Result<Option<String>, DatabaseError> {
+        let row = sqlx::query(
+            "SELECT package_name FROM system_dep_cache WHERE library_name = ? AND distro_id = ?",
+        )
+        .bind(lib)
+        .bind(distro)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row.map(|r| r.get("package_name")))
+    }
+
+    /// Store a library → package mapping for the given distro.
+    pub async fn set_cached_system_dep(
+        &self,
+        lib: &str,
+        distro: &str,
+        pkg: &str,
+    ) -> Result<(), DatabaseError> {
+        sqlx::query(
+            r#"
+            INSERT INTO system_dep_cache (library_name, distro_id, package_name)
+            VALUES (?, ?, ?)
+            ON CONFLICT(library_name, distro_id) DO UPDATE SET
+                package_name = excluded.package_name,
+                discovered_at = strftime('%s', 'now')
+            "#,
+        )
+        .bind(lib)
+        .bind(distro)
+        .bind(pkg)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
     }
 
     /// Close the database connection

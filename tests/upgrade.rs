@@ -8,8 +8,9 @@ use grel_cache::{
     models::{InstalledPackage, PackageStatus},
 };
 
-fn make_temp_dir() -> std::path::PathBuf {
-    let tmp = std::env::temp_dir().join(format!("grel-upgrade-test-{}", std::process::id()));
+fn make_temp_dir(label: &str) -> std::path::PathBuf {
+    let tmp =
+        std::env::temp_dir().join(format!("grel-upgrade-test-{label}-{}", std::process::id()));
     std::fs::create_dir_all(&tmp).unwrap();
     tmp
 }
@@ -20,7 +21,7 @@ fn cleanup(tmp: &std::path::PathBuf) {
 
 #[tokio::test]
 async fn update_package_clears_empty_binaries() {
-    let tmp = make_temp_dir();
+    let tmp = make_temp_dir("clear-bins");
     let db_path = tmp.join("test.sqlite");
 
     let db = Database::init(&db_path).await.expect("init db");
@@ -79,7 +80,7 @@ async fn update_package_clears_empty_binaries() {
 
 #[tokio::test]
 async fn upsert_package_updates_managed_status() {
-    let tmp = make_temp_dir();
+    let tmp = make_temp_dir("managed-status");
     let db_path = tmp.join("test.sqlite");
 
     let db = Database::init(&db_path).await.expect("init db");
@@ -113,7 +114,7 @@ async fn upsert_package_updates_managed_status() {
 
 #[tokio::test]
 async fn update_last_checked_touches_timestamp() {
-    let tmp = make_temp_dir();
+    let tmp = make_temp_dir("last-checked");
     let db_path = tmp.join("test.sqlite");
 
     let db = Database::init(&db_path).await.expect("init db");
@@ -157,7 +158,7 @@ async fn upgrade_single_package_cleans_old_binaries() {
     // This test verifies the file-cleanup logic that upgrade_single_package performs.
     // We simulate the scenario by creating the on-disk layout and invoking the
     // same cleanup helpers indirectly through a known upgrade path.
-    let tmp = make_temp_dir();
+    let tmp = make_temp_dir("clean-old-bins");
     let install_root = tmp.join("install");
     let bin_dir = tmp.join("bin");
     let download_dir = tmp.join("downloads");

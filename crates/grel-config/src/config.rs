@@ -1,5 +1,6 @@
 //! Main configuration structures and loading logic.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use figment::{
@@ -36,7 +37,9 @@ pub struct Config {
     pub security: SecurityConfig,
     pub registry: RegistryConfig,
     #[serde(default)]
-    pub migrations: std::collections::HashMap<String, String>,
+    pub elf_deps: ElfDepConfig,
+    #[serde(default)]
+    pub migrations: HashMap<String, String>,
 }
 
 impl Default for Config {
@@ -49,7 +52,8 @@ impl Default for Config {
             auth: AuthConfig::default(),
             security: SecurityConfig::default(),
             registry: RegistryConfig::default(),
-            migrations: std::collections::HashMap::new(),
+            elf_deps: ElfDepConfig::default(),
+            migrations: HashMap::new(),
         }
     }
 }
@@ -338,6 +342,57 @@ fn default_registry_url() -> String {
 }
 
 fn default_registry_auto_update() -> bool {
+    true
+}
+
+/// ELF system dependency auto-resolution settings (Linux-only feature).
+///
+/// Env var equivalents use the `GREL_ELF_DEPS__` prefix, e.g.:
+///   GREL_ELF_DEPS__AUTO_RESOLVE_SYSTEM_DEPS=false
+///   GREL_ELF_DEPS__DISTRO_OVERRIDE=debian
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ElfDepConfig {
+    /// Master switch: parse DT_NEEDED and offer to install missing system libs.
+    #[serde(default = "default_true")]
+    pub auto_resolve_system_deps: bool,
+
+    /// Print the list of discovered DT_NEEDED libraries before resolving.
+    #[serde(default = "default_true")]
+    pub show_parsed_deps: bool,
+
+    /// Override distro detection (e.g. "debian", "fedora", "arch").
+    #[serde(default)]
+    pub distro_override: Option<String>,
+
+    /// Override the entire install command template.
+    /// Use `{packages}` as the placeholder, e.g. "sudo apt-get install -y {packages}".
+    #[serde(default)]
+    pub install_cmd_template: Option<String>,
+
+    /// Global library → package name overrides (applies on all distros).
+    #[serde(default)]
+    pub library_map: HashMap<String, String>,
+
+    /// Per-distro library → package name overrides.
+    /// Keys are distro IDs (e.g. "fedora"). Takes precedence over `library_map`.
+    #[serde(default)]
+    pub distro_library_map: HashMap<String, HashMap<String, String>>,
+}
+
+impl Default for ElfDepConfig {
+    fn default() -> Self {
+        Self {
+            auto_resolve_system_deps: true,
+            show_parsed_deps: true,
+            distro_override: None,
+            install_cmd_template: None,
+            library_map: HashMap::new(),
+            distro_library_map: HashMap::new(),
+        }
+    }
+}
+
+fn default_true() -> bool {
     true
 }
 

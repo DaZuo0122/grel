@@ -43,6 +43,18 @@ async fn main() -> Result<()> {
         config.registry.url.clear();
         config.registry.auto_update = false;
     }
+    if cli.auto_resolve_deps {
+        config.elf_deps.auto_resolve_system_deps = true;
+    }
+    if cli.no_auto_resolve_deps {
+        config.elf_deps.auto_resolve_system_deps = false;
+    }
+    if cli.show_parsed_deps {
+        config.elf_deps.show_parsed_deps = true;
+    }
+    if cli.no_show_parsed_deps {
+        config.elf_deps.show_parsed_deps = false;
+    }
 
     let ctx = commands::CommandContext {
         config: &config,
