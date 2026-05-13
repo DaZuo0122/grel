@@ -1,14 +1,15 @@
-//! Integration tests against the live GitHub API.
+//! Integration tests for root-level grel behavior.
 //!
-//! These tests require network access and a valid GitHub API rate limit.
-//! Run with: `cargo test --test integration` to include them.
+//! Live GitHub API coverage is marked `#[ignore]` so the default local test
+//! suite stays deterministic and offline-friendly.
+//! Run with: `cargo test --test integration -- --ignored` to include them.
 
 use grel_config::GeneralConfig;
 use grel_core::{
     Arch, Forge, Os, PackageRef, ResolverConfig, SelectionPolicy, SelectionResult, resolve_assets,
 };
 use grel_network::{build_http_client, download};
-use grel_providers::{ProviderRegistry, ReleaseProvider};
+use grel_providers::ProviderRegistry;
 
 fn make_client() -> reqwest::Client {
     build_http_client(&GeneralConfig::default()).expect("failed to build HTTP client")
@@ -25,6 +26,7 @@ fn make_registry() -> ProviderRegistry {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
+#[ignore = "requires live GitHub API access"]
 async fn search_repos_returns_results() {
     let registry = make_registry();
     let provider = registry
@@ -50,6 +52,7 @@ async fn search_repos_returns_results() {
 }
 
 #[tokio::test]
+#[ignore = "requires live GitHub API access"]
 async fn search_repos_respects_max_results() {
     let registry = make_registry();
     let provider = registry
@@ -68,6 +71,7 @@ async fn search_repos_respects_max_results() {
 }
 
 #[tokio::test]
+#[ignore = "requires live GitHub API access"]
 async fn search_repopulates_description() {
     let registry = make_registry();
     let provider = registry
@@ -88,6 +92,7 @@ async fn search_repopulates_description() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
+#[ignore = "requires live GitHub API access"]
 async fn latest_release_has_assets() {
     let registry = make_registry();
     let provider = registry
@@ -108,6 +113,7 @@ async fn latest_release_has_assets() {
 }
 
 #[tokio::test]
+#[ignore = "requires live GitHub API access"]
 async fn latest_release_nonexistent_returns_not_found() {
     let registry = make_registry();
     let provider = registry
@@ -157,6 +163,7 @@ fn default_resolver_config() -> ResolverConfig {
 }
 
 #[tokio::test]
+#[ignore = "requires live GitHub API access"]
 async fn resolve_selects_compatible_asset() {
     let registry = make_registry();
     let provider = registry
