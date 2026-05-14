@@ -179,17 +179,53 @@ CREATE TABLE installed (
     asset_filename TEXT NOT NULL,
     checksum TEXT,
     install_path TEXT NOT NULL,       -- Actual path (bin/ or download_dir)
+    installed_binaries TEXT NOT NULL DEFAULT '',
     is_managed BOOLEAN NOT NULL DEFAULT 1,
     status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'orphaned', 'migrated')),
     orphaned_at INTEGER,
     last_checked INTEGER,
-    installed_at INTEGER DEFAULT (strftime('%s', 'now'))
+    installed_at INTEGER DEFAULT (strftime('%s', 'now')),
+    manifest_source TEXT NOT NULL DEFAULT 'heuristic' CHECK (manifest_source IN ('registry', 'in_repo', 'heuristic')),
+    is_explicit BOOLEAN NOT NULL DEFAULT 1
 );
 CREATE UNIQUE INDEX idx_pkg_unique ON installed(forge, owner, repo);
 CREATE INDEX idx_status ON installed(status);
+
+CREATE TABLE dependencies (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    package_id INTEGER NOT NULL,
+    dep_target TEXT NOT NULL,         -- "forge/owner/repo" or "system:libname"
+    dep_type TEXT NOT NULL DEFAULT 'grel' CHECK (dep_type IN ('grel', 'grel_opt', 'system')),
+    FOREIGN KEY (package_id) REFERENCES installed(id) ON DELETE CASCADE
+);
+CREATE INDEX idx_deps_package ON dependencies(package_id);
+CREATE INDEX idx_deps_target ON dependencies(dep_target);
+
+CREATE TABLE etag_cache (
+    url TEXT PRIMARY KEY,
+    etag TEXT NOT NULL,
+    last_modified INTEGER NOT NULL
+);
+
+CREATE TABLE dns_cache (
+    hostname TEXT NOT NULL,
+    ip_address TEXT NOT NULL,
+    rtt_ms INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL,
+    PRIMARY KEY (hostname, ip_address)
+);
+
+CREATE TABLE system_dep_cache (
+    library_name TEXT NOT NULL,
+    distro_id TEXT NOT NULL,
+    package_name TEXT NOT NULL,
+    discovered_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
+    PRIMARY KEY (library_name, distro_id)
+);
 ```
 - `is_managed`: `true` = auto-extracted/linked to `bin/`; `false` = left in `download_dir`
 - `install_path`: Stores actual destination for accurate cleanup/migration
+- `dependencies.dep_target`: Unified target string. Grel packages use `forge/owner/repo`; system libraries use `system:libname` (e.g., `system:libssl.so.3`)
 
 ---
 

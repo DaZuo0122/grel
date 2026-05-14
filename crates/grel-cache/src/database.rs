@@ -93,38 +93,9 @@ impl Database {
             .await
             .ok();
 
-        // Create dependencies table
-        sqlx::query(
-            r#"
-            CREATE TABLE IF NOT EXISTS dependencies (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                package_id INTEGER NOT NULL,
-                dep_forge TEXT NOT NULL,
-                dep_owner TEXT NOT NULL,
-                dep_repo TEXT NOT NULL,
-                dep_type TEXT NOT NULL DEFAULT 'grel' CHECK (dep_type IN ('grel', 'grel_opt', 'system')),
-                FOREIGN KEY (package_id) REFERENCES installed(id) ON DELETE CASCADE
-            )
-            "#,
-        )
-        .execute(pool)
-        .await?;
-
-        sqlx::query(
-            r#"
-            CREATE INDEX IF NOT EXISTS idx_deps_package ON dependencies(package_id)
-            "#,
-        )
-        .execute(pool)
-        .await?;
-
-        sqlx::query(
-            r#"
-            CREATE INDEX IF NOT EXISTS idx_deps_target ON dependencies(dep_forge, dep_owner, dep_repo)
-            "#,
-        )
-        .execute(pool)
-        .await?;
+        // Migrate dependencies table from old schema (dep_forge/dep_owner/dep_repo)
+        // to new schema (dep_target) if needed.
+        Self::migrate_dependencies_schema(pool).await?;
 
         sqlx::query(
             r#"
@@ -186,6 +157,132 @@ impl Database {
         )
         .execute(pool)
         .await?;
+
+        Ok(())
+    }
+
+    /// Migrate the dependencies table from the old schema
+    /// (dep_forge/dep_owner/dep_repo) to the new schema (dep_target).
+    async fn migrate_dependencies_schema(pool: &SqlitePool) -> Result<(), DatabaseError> {
+        // Check if the old dependencies table exists with dep_forge column
+        let old_schema_exists = sqlx::query(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='dependencies'",
+        )
+        .fetch_optional(pool)
+        .await?
+        .is_some();
+
+        if !old_schema_exists {
+            // Fresh database — create the new table directly
+            sqlx::query(
+                r#"
+                CREATE TABLE dependencies (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    package_id INTEGER NOT NULL,
+                    dep_target TEXT NOT NULL,
+                    dep_type TEXT NOT NULL DEFAULT 'grel' CHECK (dep_type IN ('grel', 'grel_opt', 'system')),
+                    FOREIGN KEY (package_id) REFERENCES installed(id) ON DELETE CASCADE
+                )
+                "#,
+            )
+            .execute(pool)
+            .await?;
+
+            sqlx::query(
+                r#"
+                CREATE INDEX IF NOT EXISTS idx_deps_package ON dependencies(package_id)
+                "#,
+            )
+            .execute(pool)
+            .await?;
+
+            sqlx::query(
+                r#"
+                CREATE INDEX IF NOT EXISTS idx_deps_target ON dependencies(dep_target)
+                "#,
+            )
+            .execute(pool)
+            .await?;
+
+            return Ok(());
+        }
+
+        // Check if the existing table already has dep_target (new schema)
+        let has_new_schema = sqlx::query(
+            "SELECT 1 FROM pragma_table_info('dependencies') WHERE name = 'dep_target'",
+        )
+        .fetch_optional(pool)
+        .await?
+        .is_some();
+
+        if has_new_schema {
+            // Ensure indexes exist
+            sqlx::query(
+                r#"
+                CREATE INDEX IF NOT EXISTS idx_deps_package ON dependencies(package_id)
+                "#,
+            )
+            .execute(pool)
+            .await?;
+
+            sqlx::query(
+                r#"
+                CREATE INDEX IF NOT EXISTS idx_deps_target ON dependencies(dep_target)
+                "#,
+            )
+            .execute(pool)
+            .await?;
+
+            return Ok(());
+        }
+
+        // Old schema detected — recreate in-place
+        sqlx::query("ALTER TABLE dependencies RENAME TO dependencies_old")
+            .execute(pool)
+            .await?;
+
+        sqlx::query(
+            r#"
+            CREATE TABLE dependencies (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                package_id INTEGER NOT NULL,
+                dep_target TEXT NOT NULL,
+                dep_type TEXT NOT NULL DEFAULT 'grel' CHECK (dep_type IN ('grel', 'grel_opt', 'system')),
+                FOREIGN KEY (package_id) REFERENCES installed(id) ON DELETE CASCADE
+            )
+            "#,
+        )
+        .execute(pool)
+        .await?;
+
+        sqlx::query(
+            r#"
+            CREATE INDEX idx_deps_package ON dependencies(package_id)
+            "#,
+        )
+        .execute(pool)
+        .await?;
+
+        sqlx::query(
+            r#"
+            CREATE INDEX idx_deps_target ON dependencies(dep_target)
+            "#,
+        )
+        .execute(pool)
+        .await?;
+
+        // Migrate old data: dep_target = dep_forge || '/' || dep_owner || '/' || dep_repo
+        sqlx::query(
+            r#"
+            INSERT INTO dependencies (package_id, dep_target, dep_type)
+            SELECT package_id, dep_forge || '/' || dep_owner || '/' || dep_repo, dep_type
+            FROM dependencies_old
+            "#,
+        )
+        .execute(pool)
+        .await?;
+
+        sqlx::query("DROP TABLE dependencies_old").execute(pool).await?;
 
         Ok(())
     }
@@ -412,7 +509,7 @@ impl Database {
     ) -> Result<Vec<crate::models::Dependency>, DatabaseError> {
         let rows = sqlx::query(
             r#"
-            SELECT id, package_id, dep_forge, dep_owner, dep_repo, dep_type
+            SELECT id, package_id, dep_target, dep_type
             FROM dependencies
             WHERE package_id = ?
             "#,
@@ -426,9 +523,7 @@ impl Database {
             .map(|r| crate::models::Dependency {
                 id: Some(r.get("id")),
                 package_id: r.get("package_id"),
-                dep_forge: r.get("dep_forge"),
-                dep_owner: r.get("dep_owner"),
-                dep_repo: r.get("dep_repo"),
+                dep_target: r.get("dep_target"),
                 dep_type: crate::models::DependencyType::from_str(&r.get::<String, _>("dep_type")),
             })
             .collect())
@@ -450,14 +545,12 @@ impl Database {
         for dep in deps {
             sqlx::query(
                 r#"
-                INSERT INTO dependencies (package_id, dep_forge, dep_owner, dep_repo, dep_type)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO dependencies (package_id, dep_target, dep_type)
+                VALUES (?, ?, ?)
                 "#,
             )
             .bind(package_id)
-            .bind(&dep.dep_forge)
-            .bind(&dep.dep_owner)
-            .bind(&dep.dep_repo)
+            .bind(&dep.dep_target)
             .bind(dep.dep_type.to_string())
             .execute(&self.pool)
             .await?;
@@ -466,12 +559,14 @@ impl Database {
         Ok(())
     }
 
-    /// Get packages that depend on the given package
+    /// Get packages that depend on the given dependency target.
+    ///
+    /// `dep_target` is the full dependency string, e.g.:
+    /// - `"github/owner/repo"` for grel packages
+    /// - `"system:libssl.so.3"` for system libraries
     pub async fn get_dependents(
         &self,
-        forge: &str,
-        owner: &str,
-        repo: &str,
+        dep_target: &str,
     ) -> Result<Vec<InstalledPackage>, DatabaseError> {
         let rows = sqlx::query(
             r#"
@@ -479,12 +574,10 @@ impl Database {
                    i.install_path, i.installed_binaries, i.is_managed, i.status, i.orphaned_at, i.last_checked, i.installed_at, i.manifest_source, i.is_explicit
             FROM installed i
             JOIN dependencies d ON i.id = d.package_id
-            WHERE d.dep_forge = ? AND d.dep_owner = ? AND d.dep_repo = ?
+            WHERE d.dep_target = ?
             "#,
         )
-        .bind(forge)
-        .bind(owner)
-        .bind(repo)
+        .bind(dep_target)
         .fetch_all(&self.pool)
         .await?;
 

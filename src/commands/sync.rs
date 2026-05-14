@@ -871,14 +871,7 @@ pub async fn cmd_sync(ctx: &CommandContext<'_>, packages: &[String]) -> Result<(
                     .await
                     {
                         Ok(dep_id) if dep_id > 0 => {
-                            dep_records.push(models::Dependency {
-                                id: None,
-                                package_id: target_pkg_id,
-                                dep_forge: dep_ref.forge.to_string(),
-                                dep_owner: dep_ref.owner.clone(),
-                                dep_repo: dep_ref.repo.clone(),
-                                dep_type: models::DependencyType::Grel,
-                            });
+                            dep_records.push(models::Dependency::grel(target_pkg_id, dep_ref));
                         }
                         Ok(_) => {}
                         Err(e) => {
@@ -886,15 +879,13 @@ pub async fn cmd_sync(ctx: &CommandContext<'_>, packages: &[String]) -> Result<(
                         }
                     }
                 } else if already_installed && target_pkg_id > 0 {
-                    dep_records.push(models::Dependency {
-                        id: None,
-                        package_id: target_pkg_id,
-                        dep_forge: dep_ref.forge.to_string(),
-                        dep_owner: dep_ref.owner.clone(),
-                        dep_repo: dep_ref.repo.clone(),
-                        dep_type: models::DependencyType::Grel,
-                    });
+                    dep_records.push(models::Dependency::grel(target_pkg_id, dep_ref));
                 }
+            }
+
+            // Persist system dependencies
+            for lib in &manifest.dependencies.system {
+                dep_records.push(models::Dependency::system(target_pkg_id, lib));
             }
 
             if target_pkg_id > 0 && !dep_records.is_empty() {
@@ -903,6 +894,7 @@ pub async fn cmd_sync(ctx: &CommandContext<'_>, packages: &[String]) -> Result<(
                 }
             }
 
+            // Check availability of required system libraries
             if !manifest.dependencies.system.is_empty() {
                 let report =
                     grel_network::system_deps::check_system_deps(&manifest.dependencies.system);

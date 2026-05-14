@@ -245,6 +245,16 @@ pub async fn cmd_info_local(ctx: &CommandContext<'_>, pkg_ref_str: String) -> Re
         println!("  SHA256:        {checksum}");
     }
 
+    // Show dependencies
+    if let Ok(deps) = db.get_dependencies(pkg.id.unwrap_or(0)).await {
+        if !deps.is_empty() {
+            println!("  Dependencies:");
+            for dep in &deps {
+                println!("    {}", dep.display_target());
+            }
+        }
+    }
+
     db.close().await;
     Ok(())
 }

@@ -146,10 +146,60 @@ impl InstalledPackage {
 pub struct Dependency {
     pub id: Option<i64>,
     pub package_id: i64,
-    pub dep_forge: String,
-    pub dep_owner: String,
-    pub dep_repo: String,
+    /// Target of the dependency.
+    /// - Grel packages: "forge/owner/repo" (e.g., "github/BurntSushi/ripgrep")
+    /// - System libraries: "system:libname" (e.g., "system:libssl.so.3")
+    pub dep_target: String,
     pub dep_type: DependencyType,
+}
+
+impl Dependency {
+    /// Create a dependency on a grel-installable package.
+    pub fn grel(package_id: i64, pkg_ref: &grel_core::PackageRef) -> Self {
+        Self {
+            id: None,
+            package_id,
+            dep_target: format!("{}/{}/{}", pkg_ref.forge, pkg_ref.owner, pkg_ref.repo),
+            dep_type: DependencyType::Grel,
+        }
+    }
+
+    /// Create a dependency on a system shared library.
+    pub fn system(package_id: i64, lib_name: &str) -> Self {
+        Self {
+            id: None,
+            package_id,
+            dep_target: format!("system:{lib_name}"),
+            dep_type: DependencyType::System,
+        }
+    }
+
+    /// If this is a grel dependency, parse `dep_target` into a `PackageRef`.
+    pub fn as_grel_ref(&self) -> Option<grel_core::PackageRef> {
+        if self.dep_type != DependencyType::Grel && self.dep_type != DependencyType::GrelOpt {
+            return None;
+        }
+        grel_core::PackageRef::parse(&self.dep_target).ok()
+    }
+
+    /// If this is a system dependency, return the library name (without the "system:" prefix).
+    pub fn as_system_lib(&self) -> Option<&str> {
+        if self.dep_type != DependencyType::System {
+            return None;
+        }
+        self.dep_target.strip_prefix("system:")
+    }
+
+    /// Human-readable display of the dependency target.
+    pub fn display_target(&self) -> String {
+        match self.dep_type {
+            DependencyType::System => {
+                self.as_system_lib()
+                    .map_or_else(|| self.dep_target.clone(), |lib| format!("{lib} [system]"))
+            }
+            _ => self.dep_target.clone(),
+        }
+    }
 }
 
 /// Type of dependency
@@ -195,4 +245,72 @@ pub struct DNSCacheEntry {
     pub ip_address: String,
     pub rtt_ms: u64,
     pub expires_at: i64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use grel_core::{Forge, PackageRef};
+
+    #[test]
+    fn test_dependency_grel_constructor() {
+        let pkg_ref = PackageRef::new(Forge::GitHub, "BurntSushi".into(), "ripgrep".into(), None);
+        let dep = Dependency::grel(42, &pkg_ref);
+
+        assert_eq!(dep.package_id, 42);
+        assert_eq!(dep.dep_target, "github/BurntSushi/ripgrep");
+        assert_eq!(dep.dep_type, DependencyType::Grel);
+    }
+
+    #[test]
+    fn test_dependency_system_constructor() {
+        let dep = Dependency::system(7, "libssl.so.3");
+
+        assert_eq!(dep.package_id, 7);
+        assert_eq!(dep.dep_target, "system:libssl.so.3");
+        assert_eq!(dep.dep_type, DependencyType::System);
+    }
+
+    #[test]
+    fn test_as_grel_ref_parses_correctly() {
+        let pkg_ref = PackageRef::new(Forge::GitLab, "owner".into(), "repo".into(), None);
+        let dep = Dependency::grel(1, &pkg_ref);
+
+        let parsed = dep.as_grel_ref().expect("should parse");
+        assert_eq!(parsed.forge, Forge::GitLab);
+        assert_eq!(parsed.owner, "owner");
+        assert_eq!(parsed.repo, "repo");
+    }
+
+    #[test]
+    fn test_as_grel_ref_returns_none_for_system() {
+        let dep = Dependency::system(1, "libcurl.so.4");
+        assert!(dep.as_grel_ref().is_none());
+    }
+
+    #[test]
+    fn test_as_system_lib_extracts_name() {
+        let dep = Dependency::system(1, "libz.so.1");
+        assert_eq!(dep.as_system_lib(), Some("libz.so.1"));
+    }
+
+    #[test]
+    fn test_as_system_lib_returns_none_for_grel() {
+        let pkg_ref = PackageRef::new(Forge::GitHub, "a".into(), "b".into(), None);
+        let dep = Dependency::grel(1, &pkg_ref);
+        assert!(dep.as_system_lib().is_none());
+    }
+
+    #[test]
+    fn test_display_target_grel() {
+        let pkg_ref = PackageRef::new(Forge::GitHub, "a".into(), "b".into(), None);
+        let dep = Dependency::grel(1, &pkg_ref);
+        assert_eq!(dep.display_target(), "github/a/b");
+    }
+
+    #[test]
+    fn test_display_target_system() {
+        let dep = Dependency::system(1, "libssl.so.3");
+        assert_eq!(dep.display_target(), "libssl.so.3 [system]");
+    }
 }

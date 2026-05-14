@@ -32,7 +32,7 @@ pub async fn cmd_remove(ctx: &CommandContext<'_>, packages: &[String]) -> Result
         let id = pkg.id.expect("Package must have an ID");
 
         let dependents = db
-            .get_dependents(&pkg_ref.forge.to_string(), &pkg_ref.owner, &pkg_ref.repo)
+            .get_dependents(&pkg_ref.to_string_ref())
             .await?;
         if !dependents.is_empty() && !ctx.cli.recursive {
             eprintln!(
@@ -116,13 +116,10 @@ pub async fn cmd_remove(ctx: &CommandContext<'_>, packages: &[String]) -> Result
                 if let Ok(deps) = db.get_dependencies(p.id.unwrap_or(0)).await {
                     let from = PackageRef::parse_with_forge(&p.package_ref(), Forge::GitHub)?;
                     for dep in deps {
-                        let to = PackageRef::new(
-                            dep.dep_forge.parse().unwrap_or(Forge::GitHub),
-                            dep.dep_owner,
-                            dep.dep_repo,
-                            None,
-                        );
-                        graph.add_edge(from.clone(), to);
+                        if let Some(to) = dep.as_grel_ref() {
+                            graph.add_edge(from.clone(), to);
+                        }
+                        // System deps are skipped — they are not grel-removable
                     }
                 }
             }
@@ -156,7 +153,7 @@ pub async fn cmd_remove_unneeded(ctx: &CommandContext<'_>) -> Result<()> {
     let mut to_remove = Vec::new();
     for pkg in &all_packages {
         if !pkg.is_explicit && matches!(pkg.status, models::PackageStatus::Active) {
-            let dependents = db.get_dependents(&pkg.forge, &pkg.owner, &pkg.repo).await?;
+            let dependents = db.get_dependents(&pkg.package_ref()).await?;
             if dependents.is_empty() {
                 to_remove.push(pkg.clone());
             }
@@ -180,13 +177,10 @@ pub async fn cmd_remove_unneeded(ctx: &CommandContext<'_>) -> Result<()> {
         if let Ok(deps) = db.get_dependencies(p.id.unwrap_or(0)).await {
             let from = PackageRef::parse_with_forge(&p.package_ref(), Forge::GitHub)?;
             for dep in deps {
-                let to = PackageRef::new(
-                    dep.dep_forge.parse().unwrap_or(Forge::GitHub),
-                    dep.dep_owner,
-                    dep.dep_repo,
-                    None,
-                );
-                graph.add_edge(from.clone(), to);
+                if let Some(to) = dep.as_grel_ref() {
+                    graph.add_edge(from.clone(), to);
+                }
+                // System deps are skipped — they are not grel-removable
             }
         }
     }
