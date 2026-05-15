@@ -212,6 +212,7 @@ fn parse_os_release_field(content: &str, field: &str) -> Option<String> {
     None
 }
 
+#[allow(clippy::unwrap_used)]
 #[cfg(test)]
 mod tests {
     use super::*;

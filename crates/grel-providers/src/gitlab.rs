@@ -54,14 +54,14 @@ impl ReleaseProvider for GitLabProvider {
             return Err(ProviderError::NotFound(format!("{owner}/{repo} not found")));
         }
 
-        let releases: Vec<GitLabRelease> = response.json().await?;
+        let mut releases: Vec<GitLabRelease> = response.json().await?;
         if releases.is_empty() {
             return Err(ProviderError::NotFound(format!(
                 "No releases found for {owner}/{repo}"
             )));
         }
 
-        let release = from_gitlab_release(releases.into_iter().next().unwrap(), owner, repo);
+        let release = from_gitlab_release(releases.remove(0), owner, repo);
         Ok(release)
     }
 

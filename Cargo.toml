@@ -68,6 +68,7 @@ unsafe_code = "warn"
 [workspace.lints.clippy]
 all = "warn"
 pedantic = "warn"
+unwrap_used = "deny"
 
 [workspace.dependencies]
 # Core & Async

@@ -247,6 +247,7 @@ pub struct DNSCacheEntry {
     pub expires_at: i64,
 }
 
+#[allow(clippy::unwrap_used)]
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -371,7 +371,7 @@ impl Database {
     pub async fn mark_orphaned(&self, id: i64) -> Result<(), DatabaseError> {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
+            .unwrap_or(std::time::Duration::ZERO)
             .as_secs() as i64;
 
         sqlx::query(

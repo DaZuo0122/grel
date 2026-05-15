@@ -3,6 +3,8 @@
 //! These tests focus on database consistency and file cleanup behavior
 //! without requiring live network access.
 
+#![allow(clippy::unwrap_used)]
+
 use grel_cache::{
     Database,
     models::{InstalledPackage, PackageStatus},

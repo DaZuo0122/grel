@@ -175,17 +175,17 @@ pub fn resolve_assets(
     // Step 3: Policy fallback
     match sorted.len() {
         0 => SelectionResult::NoCompatibleAssets,
-        1 => SelectionResult::SingleAsset(sorted.into_iter().next().unwrap()),
+        1 => SelectionResult::SingleAsset(sorted.remove(0)),
         _ => {
             // Check if there's a clear winner after sorting
             match &config.default_selection_policy {
                 SelectionPolicy::First => {
-                    SelectionResult::SingleAsset(sorted.into_iter().next().unwrap())
+                    SelectionResult::SingleAsset(sorted.remove(0))
                 }
                 SelectionPolicy::Largest => {
                     // Pick by size_bytes descending
                     sorted.sort_by_key(|a| std::cmp::Reverse(a.size_bytes.unwrap_or(0)));
-                    SelectionResult::SingleAsset(sorted.into_iter().next().unwrap())
+                    SelectionResult::SingleAsset(sorted.remove(0))
                 }
             }
         }
@@ -304,7 +304,7 @@ pub fn resolve_assets_detailed(
 
     if sorted.len() == 1 {
         return Some(AssetSelection {
-            default: sorted.into_iter().next().unwrap(),
+            default: sorted.remove(0),
             alternatives: vec![],
             default_is_managed: false, // will be determined by caller
         });
@@ -335,6 +335,7 @@ fn is_format_ignored(format: &str, ignore_formats: &[String]) -> bool {
     ignore_formats.iter().any(|p| format_matches(format, p))
 }
 
+#[allow(clippy::unwrap_used)]
 #[cfg(test)]
 mod tests {
     use super::*;

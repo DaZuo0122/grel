@@ -1255,7 +1255,16 @@ pub async fn cmd_upgrade(ctx: &CommandContext<'_>) -> Result<()> {
                 continue;
             }
             grel_core::SelectionResult::MultipleAssets(assets) => {
-                assets.into_iter().next().unwrap()
+                match assets.into_iter().next() {
+                    Some(a) => a,
+                    None => {
+                        errors.push((
+                            pkg_ref_str.clone(),
+                            "Asset selection returned empty list".into(),
+                        ));
+                        continue;
+                    }
+                }
             }
         };
 

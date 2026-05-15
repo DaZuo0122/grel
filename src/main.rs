@@ -138,7 +138,10 @@ async fn main() -> Result<()> {
             if let Some(ref pattern) = cli.search {
                 commands::files::cmd_file_search(&ctx, pattern.clone()).await?;
             } else if !cli.list.is_empty() || !cli.targets.is_empty() {
-                let pkg = cli.list.first().or_else(|| cli.targets.first()).unwrap();
+                let Some(pkg) = cli.list.first().or_else(|| cli.targets.first()) else {
+                    eprintln!("Usage: grel -Fl <package>");
+                    return Ok(());
+                };
                 commands::files::cmd_file_list(&ctx, pkg.clone()).await?;
             } else if cli.refresh {
                 commands::files::cmd_reindex(&ctx).await?;

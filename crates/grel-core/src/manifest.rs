@@ -213,6 +213,7 @@ pub enum ManifestError {
     ParseError(#[from] toml::de::Error),
 }
 
+#[allow(clippy::unwrap_used)]
 #[cfg(test)]
 mod tests {
     use super::*;

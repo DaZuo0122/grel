@@ -207,6 +207,7 @@ pub struct GitHubOwner {
     pub login: String,
 }
 
+#[allow(clippy::unwrap_used)]
 #[cfg(test)]
 mod tests {
     use super::*;

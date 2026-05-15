@@ -290,6 +290,7 @@ fn which(cmd: &str) -> bool {
         .unwrap_or(false)
 }
 
+#[allow(clippy::unwrap_used)]
 #[cfg(test)]
 mod tests {
     use super::*;

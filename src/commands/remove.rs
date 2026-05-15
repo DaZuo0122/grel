@@ -29,7 +29,10 @@ pub async fn cmd_remove(ctx: &CommandContext<'_>, packages: &[String]) -> Result
             continue;
         };
 
-        let id = pkg.id.expect("Package must have an ID");
+        let Some(id) = pkg.id else {
+            eprintln!("{}", "Package record is missing an ID".red());
+            continue;
+        };
 
         let dependents = db
             .get_dependents(&pkg_ref.to_string_ref())

@@ -6,10 +6,12 @@ use std::io::{self, Write};
 pub fn ask_confirmation(prompt: &str, default_yes: bool) -> bool {
     let default_str = if default_yes { "[Y/n]" } else { "[y/N]" };
     print!("{prompt} {default_str}: ");
-    io::stdout().flush().unwrap();
+    io::stdout().flush().ok();
 
     let mut input = String::new();
-    io::stdin().read_line(&mut input).unwrap();
+    if io::stdin().read_line(&mut input).is_err() {
+        return default_yes;
+    }
 
     let input = input.trim().to_lowercase();
     match input.as_str() {
@@ -52,10 +54,12 @@ pub fn select_from_list(prompt: &str, options: &[String]) -> Option<usize> {
         println!("  {}) {}", i + 1, option);
     }
     print!("Select [1-{}]: ", options.len());
-    io::stdout().flush().unwrap();
+    io::stdout().flush().ok();
 
     let mut input = String::new();
-    io::stdin().read_line(&mut input).unwrap();
+    if io::stdin().read_line(&mut input).is_err() {
+        return None;
+    }
 
     input
         .trim()

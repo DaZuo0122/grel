@@ -308,7 +308,10 @@ fn link_binaries(
             })?;
             let path = entry.path();
             if path.is_file() && is_executable(&path) {
-                let dest = bin_dir.join(path.file_name().unwrap());
+                let Some(name) = path.file_name() else {
+                    continue;
+                };
+                let dest = bin_dir.join(name);
                 create_binary_link(&path, &dest)?;
                 installed.push(dest);
             }
@@ -338,7 +341,10 @@ fn collect_binaries(
         if path.is_dir() {
             collect_binaries(&path, bin_dir, installed)?;
         } else if path.is_file() && is_executable(&path) {
-            let dest = bin_dir.join(path.file_name().unwrap());
+            let Some(name) = path.file_name() else {
+                continue;
+            };
+            let dest = bin_dir.join(name);
             create_binary_link(&path, &dest)?;
             installed.push(dest);
         }
@@ -547,6 +553,7 @@ fn sanitize_tar_path(entry_path: &Path) -> Result<String, NetworkError> {
     Ok(result.to_string_lossy().to_string())
 }
 
+#[allow(clippy::unwrap_used)]
 #[cfg(test)]
 mod tests {
     use super::*;

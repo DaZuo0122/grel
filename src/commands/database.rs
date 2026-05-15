@@ -28,7 +28,9 @@ pub async fn cmd_migrate(ctx: &CommandContext<'_>, old_ref: &str, new_ref: &str)
         return Ok(());
     };
 
-    let id = old_pkg.id.expect("Package must have an ID");
+    let Some(id) = old_pkg.id else {
+        anyhow::bail!("Package record is missing an ID");
+    };
 
     let mut new_pkg = grel_cache::models::InstalledPackage::new(
         new_ref.forge.to_string(),

@@ -4,6 +4,8 @@
 //! suite stays deterministic and offline-friendly.
 //! Run with: `cargo test --test integration -- --ignored` to include them.
 
+#![allow(clippy::unwrap_used)]
+
 use grel_config::GeneralConfig;
 use grel_core::{
     Arch, Forge, Os, PackageRef, ResolverConfig, SelectionPolicy, SelectionResult, resolve_assets,
