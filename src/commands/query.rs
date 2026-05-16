@@ -62,10 +62,10 @@ pub async fn cmd_list(ctx: &CommandContext<'_>) -> Result<()> {
             continue;
         }
 
-        let status_icon = match pkg.status {
-            models::PackageStatus::Active => "green",
-            models::PackageStatus::Orphaned => "yellow",
-            models::PackageStatus::Migrated => "white",
+        let status_icon: String = match pkg.status {
+            models::PackageStatus::Active => "●".green().to_string(),
+            models::PackageStatus::Orphaned => "●".yellow().to_string(),
+            models::PackageStatus::Migrated => "●".white().to_string(),
         };
 
         let managed_tag = if pkg.is_managed {
@@ -76,7 +76,8 @@ pub async fn cmd_list(ctx: &CommandContext<'_>) -> Result<()> {
         let explicit_tag = if pkg.is_explicit { "explicit" } else { "dep" };
 
         print!(
-            "  [{status_icon}] {:<30} {:<12} {:<10} {:<8} {}",
+            "  {}  {:<30} {:<12} {:<10} {:<8} {}",
+            status_icon,
             pkg.package_ref(),
             format!("v{}", pkg.version),
             managed_tag,
@@ -353,10 +354,44 @@ pub async fn cmd_owns(ctx: &CommandContext<'_>, path: String) -> Result<()> {
     let db = ctx.db().await?;
     let packages = db.list_packages().await?;
 
-    let found: Vec<_> = packages
-        .iter()
-        .filter(|p| p.install_path.contains(&path) || p.asset_filename.contains(&path))
-        .collect();
+    let query = std::path::Path::new(&path);
+    let query_canon = query.canonicalize().ok();
+
+    let mut found = Vec::new();
+    for pkg in &packages {
+        let install_path = std::path::Path::new(&pkg.install_path);
+
+        // Candidate 1: linked binaries in bin_dir
+        let mut matched = false;
+        for bin_name in pkg.binary_list() {
+            let bin_path = ctx.config.paths.bin_dir.join(&bin_name);
+            if path_matches(&bin_path, query, query_canon.as_deref()) {
+                matched = true;
+                break;
+            }
+        }
+
+        // Candidate 2: install directory itself
+        if !matched && path_matches(install_path, query, query_canon.as_deref()) {
+            matched = true;
+        }
+
+        // Candidate 3: archive file
+        if !matched {
+            let archive_path = if install_path.ends_with(&pkg.asset_filename) {
+                install_path.to_path_buf()
+            } else {
+                install_path.join(&pkg.asset_filename)
+            };
+            if path_matches(&archive_path, query, query_canon.as_deref()) {
+                matched = true;
+            }
+        }
+
+        if matched {
+            found.push(pkg);
+        }
+    }
 
     if found.is_empty() {
         println!("No package owns '{}'", path);
@@ -368,6 +403,34 @@ pub async fn cmd_owns(ctx: &CommandContext<'_>, path: String) -> Result<()> {
 
     db.close().await;
     Ok(())
+}
+
+/// Check if a candidate path matches the query path.
+fn path_matches(
+    candidate: &std::path::Path,
+    query: &std::path::Path,
+    query_canon: Option<&std::path::Path>,
+) -> bool {
+    if candidate == query {
+        return true;
+    }
+    if let Ok(canon) = candidate.canonicalize() {
+        if canon == query {
+            return true;
+        }
+        if let Some(qc) = query_canon {
+            if canon == qc {
+                return true;
+            }
+        }
+    }
+    // Fallback: check if query ends with the candidate filename
+    if let (Some(q_name), Some(c_name)) = (query.file_name(), candidate.file_name()) {
+        if q_name == c_name {
+            return true;
+        }
+    }
+    false
 }
 
 /// Verify checksums of installed files
@@ -392,7 +455,12 @@ pub async fn cmd_verify_checksums(ctx: &CommandContext<'_>) -> Result<()> {
     let mut missing = 0;
 
     for pkg in &active {
-        let archive_path = std::path::Path::new(&pkg.install_path).join(&pkg.asset_filename);
+        let install_path = std::path::Path::new(&pkg.install_path);
+        let archive_path = if install_path.ends_with(&pkg.asset_filename) {
+            install_path.to_path_buf()
+        } else {
+            install_path.join(&pkg.asset_filename)
+        };
 
         print!("  {:<35} ", pkg.package_ref());
 

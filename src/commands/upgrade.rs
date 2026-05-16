@@ -10,8 +10,8 @@ use crate::commands::CommandContext;
 pub async fn cmd_upgrade_local(ctx: &CommandContext<'_>) -> Result<()> {
     let targets = &ctx.cli.targets;
 
-    // Get file path from --local-asset or first target
-    let file_path = if let Some(ref path) = ctx.cli.local_asset {
+    // Get file path from --asset or first target
+    let file_path = if let Some(ref path) = ctx.cli.asset {
         std::path::PathBuf::from(path)
     } else if let Some(first) = targets.first() {
         std::path::PathBuf::from(first)
@@ -37,7 +37,7 @@ pub async fn cmd_upgrade_local(ctx: &CommandContext<'_>) -> Result<()> {
 
     let (pkg_ref_str, asset_path) = if targets.len() >= 2 {
         (targets[0].clone(), file_path)
-    } else if ctx.cli.local_asset.is_some() && !targets.is_empty() {
+    } else if ctx.cli.asset.is_some() && !targets.is_empty() {
         (targets[0].clone(), file_path)
     } else {
         let stem = std::path::Path::new(&filename)

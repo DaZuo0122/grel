@@ -76,7 +76,7 @@ Operations are mutually exclusive. Options can be combined without spaces (e.g.,
 |------|------|-------------|
 | `-c` | `--cascade` | Remove package + unneeded dependencies |
 | `-n` | `--nosave` | Do not preserve extracted files/config backups |
-| `-s` | `--recursive` | Remove packages that depend on the target |
+| `-r` | `--recursive` | Remove packages that depend on the target |
 | `-u` | `--unneeded` | Remove packages that are no longer required |
 | `--noconfirm` | | Skip removal confirmation |
 | `--dry-run` | | Show what would be removed |

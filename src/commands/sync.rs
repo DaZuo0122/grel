@@ -1495,7 +1495,11 @@ async fn upgrade_single_package(
     updated_pkg.asset_filename = asset.filename.clone();
     updated_pkg.checksum = Some(checksum.clone());
     updated_pkg.is_managed = is_managed;
-    updated_pkg.install_path = install_dir.to_string_lossy().to_string();
+    updated_pkg.install_path = if is_managed {
+        install_dir.to_string_lossy().to_string()
+    } else {
+        archive_path.to_string_lossy().to_string()
+    };
     updated_pkg.last_checked = Some(chrono::Utc::now().timestamp());
     updated_pkg.status = models::PackageStatus::Active;
 

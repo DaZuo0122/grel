@@ -704,7 +704,7 @@ mod tests {
             std::fs::set_permissions(&bin_path, p).unwrap();
         }
 
-        let result = link_binaries(&install_dir, &bin_dir, "mytool.tar.gz");
+        let result = link_binaries(&install_dir, &bin_dir, "mytool.tar.gz", false);
         assert!(
             result.is_ok(),
             "link_binaries should not fail: {:?}",

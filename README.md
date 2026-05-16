@@ -148,10 +148,10 @@ grel -D --asexplicit github/cli/cli
 grel -D --asdeps github/cli/cli
 
 # Clean stale caches
-grel -D --db-clean
+grel -D --clean
 
 # Check database integrity
-grel -D --db-check
+grel -D --check
 ```
 
 ## Architecture
