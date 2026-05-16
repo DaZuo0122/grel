@@ -151,6 +151,7 @@ async fn install_single_package(
     allow_keyword: bool,
     dry_run: bool,
     is_explicit: bool,
+    overwrite: bool,
 ) -> Result<i64, anyhow::Error> {
     println!("\n{}", format!("→ {}", pkg_ref.to_short_ref()).bold());
 
@@ -312,6 +313,7 @@ async fn install_single_package(
             &install_dir,
             &config.paths.bin_dir,
             &chosen_asset.filename,
+            overwrite,
         ) {
             Ok(result) => {
                 if !result.installed_binaries.is_empty() {
@@ -356,7 +358,11 @@ async fn install_single_package(
     pkg.version = release.tag.clone();
     pkg.asset_filename = chosen_asset.filename.clone();
     pkg.checksum = Some(checksum);
-    pkg.install_path = install_dir.to_string_lossy().to_string();
+    pkg.install_path = if is_managed {
+        install_dir.to_string_lossy().to_string()
+    } else {
+        archive_path.to_string_lossy().to_string()
+    };
     pkg.set_binary_list(bin_filenames);
     pkg.is_managed = is_managed;
     pkg.status = models::PackageStatus::Active;
@@ -540,10 +546,15 @@ pub async fn cmd_sync(ctx: &CommandContext<'_>, packages: &[String]) -> Result<(
         exclude_keywords.extend(extra.clone());
     }
 
+    let mut ignore_formats = ctx.config.assets.ignore_formats.clone();
+    if let Some(ref allowed) = ctx.cli.allow_format {
+        ignore_formats.retain(|f| f != allowed);
+    }
+
     let resolver_config = ResolverConfig {
         default_selection_policy: selection_policy,
         exclude_keywords,
-        ignore_formats: ctx.config.assets.ignore_formats.clone(),
+        ignore_formats,
         prefer_formats: ctx.config.assets.prefer_formats.clone(),
         prefer_32bit_on_64bit: ctx.config.assets.prefer_32bit_on_64bit,
         fallback_to_32bit: ctx.config.assets.fallback_to_32bit,
@@ -734,6 +745,28 @@ pub async fn cmd_sync(ctx: &CommandContext<'_>, packages: &[String]) -> Result<(
             }
         };
 
+        // Signature verification enforcement
+        if ctx.config.security.verify_signatures {
+            let sig_name = format!("{}.sig", chosen_asset.filename);
+            let asc_name = format!("{}.asc", chosen_asset.filename);
+            let has_sig = release.assets.iter().any(|a| a.filename == sig_name || a.filename == asc_name);
+            if !has_sig {
+                eprintln!(
+                    "  {}",
+                    format!(
+                        "Signature verification enabled but no signature file found for {}. Skipping.",
+                        chosen_asset.filename
+                    )
+                    .red()
+                );
+                continue;
+            }
+            println!(
+                "  {}",
+                format!("Signature file found for {}", chosen_asset.filename).dimmed()
+            );
+        }
+
         let is_managed = is_asset_managed(&chosen_asset, &ctx.config.assets);
 
         let install_dir = if is_managed {
@@ -778,6 +811,7 @@ pub async fn cmd_sync(ctx: &CommandContext<'_>, packages: &[String]) -> Result<(
                 &install_dir,
                 &ctx.config.paths.bin_dir,
                 &chosen_asset.filename,
+                ctx.cli.overwrite,
             ) {
                 Ok(result) => {
                     if !result.installed_binaries.is_empty() {
@@ -824,7 +858,11 @@ pub async fn cmd_sync(ctx: &CommandContext<'_>, packages: &[String]) -> Result<(
         pkg.version = release.tag.clone();
         pkg.asset_filename = chosen_asset.filename.clone();
         pkg.checksum = Some(checksum);
-        pkg.install_path = install_dir.to_string_lossy().to_string();
+        pkg.install_path = if is_managed {
+            install_dir.to_string_lossy().to_string()
+        } else {
+            archive_path.to_string_lossy().to_string()
+        };
         pkg.set_binary_list(bin_filenames);
         pkg.is_managed = is_managed;
         pkg.status = models::PackageStatus::Active;
@@ -867,6 +905,7 @@ pub async fn cmd_sync(ctx: &CommandContext<'_>, packages: &[String]) -> Result<(
                         allow_keyword,
                         ctx.cli.dry_run,
                         false,
+                        ctx.cli.overwrite,
                     )
                     .await
                     {
@@ -1374,6 +1413,7 @@ pub async fn cmd_upgrade(ctx: &CommandContext<'_>) -> Result<()> {
             ctx.config,
             *forge,
             *is_managed,
+            ctx.cli.overwrite,
         )
         .await
         {
@@ -1419,6 +1459,7 @@ async fn upgrade_single_package(
     config: &Config,
     _forge: Forge,
     is_managed: bool,
+    overwrite: bool,
 ) -> Result<Vec<std::path::PathBuf>> {
     let install_dir = if is_managed {
         config
@@ -1472,6 +1513,7 @@ async fn upgrade_single_package(
             &install_dir,
             &config.paths.bin_dir,
             &asset.filename,
+            overwrite,
         ) {
             Ok(result) => {
                 let bin_filenames: Vec<String> = result

@@ -131,6 +131,7 @@ pub async fn cmd_upgrade_local(ctx: &CommandContext<'_>) -> Result<()> {
         &install_dir,
         &ctx.config.paths.bin_dir,
         &filename,
+        ctx.cli.overwrite,
     );
 
     let (installed_binaries, is_managed) = match install_result {
@@ -171,7 +172,11 @@ pub async fn cmd_upgrade_local(ctx: &CommandContext<'_>) -> Result<()> {
     pkg.version = "local".into();
     pkg.asset_filename = filename;
     pkg.checksum = Some(checksum);
-    pkg.install_path = install_dir.to_string_lossy().to_string();
+    pkg.install_path = if is_managed {
+        install_dir.to_string_lossy().to_string()
+    } else {
+        dest_path.to_string_lossy().to_string()
+    };
     pkg.set_binary_list(installed_binaries);
     pkg.is_managed = is_managed;
     pkg.status = grel_cache::models::PackageStatus::Active;

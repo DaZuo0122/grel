@@ -30,26 +30,26 @@ Download from [Releases](https://github.com/DaZuo0122/grel/releases):
 
 ```bash
 # Linux
-grel sync github/DaZuo0122/grel
+grel -S github/DaZuo0122/grel
 
 # Windows (PowerShell)
-grel.exe sync github/DaZuo0122/grel
+grel.exe -S github/DaZuo0122/grel
 ```
 
 ## Quick Start
 
 ```bash
 # Install your first package
-grel sync github/BurntSushi/ripgrep
+grel -S github/BurntSushi/ripgrep
 
 # Upgrade all packages
 grel -Syu
 
 # List installed packages
-grel list
+grel -Q
 
 # Remove a package
-grel remove github/BurntSushi/ripgrep
+grel -R github/BurntSushi/ripgrep
 ```
 
 ## Configuration
@@ -93,13 +93,13 @@ gitea_token = ""                 # Use env $GREL_GITEA_TOKEN instead
 
 ```bash
 # Install a package
-grel sync github/cli/cli
-
-# Install with custom output directory
-grel sync github/BurntSushi/ripgrep -O /usr/local/bin
+grel -S github/cli/cli
 
 # Allow keyword-matching assets
-grel sync github/foo/bar --allow-keyword
+grel -S github/foo/bar --allow-keyword
+
+# Install without confirming asset selection
+grel -S github/foo/bar --noconfirm
 ```
 
 ### Upgrade All Packages
@@ -116,22 +116,42 @@ grel -Syu --noconfirm
 
 ```bash
 # Show all installed packages
-grel list
+grel -Q
 
-# Shows active and orphaned packages
+# Show only explicitly installed packages
+grel -Qe
+
+# Show unrequired (orphan) packages
+grel -Qt
 ```
 
 ### Remove Packages
 
 ```bash
-grel remove github/cli/cli
+# Remove a package
+grel -R github/cli/cli
+
+# Remove and delete config files (--nosave)
+grel -Rn github/cli/cli
+
+# Remove with cascade (orphaned deps)
+grel -Rc github/cli/cli
 ```
 
-### PATH Setup
+### Database Operations
 
 ```bash
-# Show PATH configuration snippets
-grel path add
+# Mark package as explicitly installed
+grel -D --asexplicit github/cli/cli
+
+# Mark package as dependency
+grel -D --asdeps github/cli/cli
+
+# Clean stale caches
+grel -D --db-clean
+
+# Check database integrity
+grel -D --db-check
 ```
 
 ## Architecture

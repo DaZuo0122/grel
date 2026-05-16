@@ -172,7 +172,7 @@ fn walkdir(path: &std::path::Path) -> Result<Vec<std::path::PathBuf>> {
     Ok(result)
 }
 
-/// List orphaned packages
+/// List orphaned packages (repo-unreachable status)
 pub async fn cmd_list_orphans(ctx: &CommandContext<'_>) -> Result<()> {
     let db = ctx.db().await?;
     let packages = db.list_packages().await?;
@@ -194,7 +194,7 @@ pub async fn cmd_list_orphans(ctx: &CommandContext<'_>) -> Result<()> {
     } else {
         println!(
             "{}",
-            format!("Orphaned packages ({})", orphans.len()).bold()
+            format!("Orphaned packages ({})" , orphans.len()).bold()
         );
         println!();
         for pkg in &orphans {
@@ -206,6 +206,61 @@ pub async fn cmd_list_orphans(ctx: &CommandContext<'_>) -> Result<()> {
                 }
             }
             println!();
+        }
+    }
+
+    db.close().await;
+    Ok(())
+}
+
+/// List unrequired packages (dependency orphans: no other package depends on them)
+pub async fn cmd_list_unrequired(ctx: &CommandContext<'_>) -> Result<()> {
+    let db = ctx.db().await?;
+    let all_packages = db.list_packages().await?;
+
+    let mut graph = grel_core::DependencyGraph::new();
+    let explicit: Vec<_> = all_packages
+        .iter()
+        .filter(|p| p.is_explicit)
+        .filter_map(|p| PackageRef::parse_with_forge(&p.package_ref(), Forge::GitHub).ok())
+        .collect();
+    let installed: Vec<_> = all_packages
+        .iter()
+        .filter_map(|p| PackageRef::parse_with_forge(&p.package_ref(), Forge::GitHub).ok())
+        .collect();
+
+    for p in &all_packages {
+        if let Ok(deps) = db.get_dependencies(p.id.unwrap_or(0)).await {
+            if let Ok(from) = PackageRef::parse_with_forge(&p.package_ref(), Forge::GitHub) {
+                for dep in deps {
+                    if let Some(to) = dep.as_grel_ref() {
+                        graph.add_edge(from.clone(), to);
+                    }
+                }
+            }
+        }
+    }
+
+    let orphans = graph.find_orphans(&installed, &explicit);
+
+    if orphans.is_empty() {
+        println!("No unrequired packages.");
+        db.close().await;
+        return Ok(());
+    }
+
+    if ctx.cli.quiet {
+        for orphan in &orphans {
+            println!("{}", orphan.to_short_ref());
+        }
+    } else {
+        println!(
+            "{}",
+            format!("Unrequired packages ({})", orphans.len()).bold()
+        );
+        println!();
+        for orphan in &orphans {
+            println!("  {}", orphan.to_short_ref());
         }
     }
 

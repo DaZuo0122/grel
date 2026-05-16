@@ -55,6 +55,9 @@ async fn main() -> Result<()> {
     if cli.no_show_parsed_deps {
         config.elf_deps.show_parsed_deps = false;
     }
+    if let Some(ref proxy) = cli.proxy {
+        config.general.proxy = proxy.clone();
+    }
 
     let ctx = commands::CommandContext {
         config: &config,
@@ -79,7 +82,9 @@ async fn main() -> Result<()> {
             }
         }
         Operation::Query => {
-            if cli.unrequired || cli.orphans {
+            if cli.unrequired {
+                commands::query::cmd_list_unrequired(&ctx).await?;
+            } else if cli.orphans {
                 commands::query::cmd_list_orphans(&ctx).await?;
             } else if let Some(ref pkg) = cli.info {
                 commands::query::cmd_info_local(&ctx, pkg.clone()).await?;

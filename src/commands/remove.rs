@@ -237,7 +237,7 @@ pub async fn cmd_remove_unneeded(ctx: &CommandContext<'_>) -> Result<()> {
 pub async fn remove_package_files(
     config: &grel_config::Config,
     pkg: &grel_cache::models::InstalledPackage,
-    _nosave: bool,
+    nosave: bool,
 ) -> Result<()> {
     // Delete binaries from bin_dir
     for bin_name in pkg.binary_list() {
@@ -247,19 +247,65 @@ pub async fn remove_package_files(
         }
     }
 
-    // Delete the entire install directory
+    // Delete the install path
     let install_path = std::path::Path::new(&pkg.install_path);
     if install_path.exists() {
         if install_path.is_dir() {
+            if !nosave {
+                // Preserve config files before deletion
+                preserve_config_files(install_path);
+            }
             std::fs::remove_dir_all(install_path).ok();
         } else {
             std::fs::remove_file(install_path).ok();
         }
     }
 
-    // NOTE: nosave is currently a no-op because grel does not yet implement
-    // config file preservation (.grelnew). When that feature is added,
-    // nosave=false should preserve config files while nosave=true removes everything.
-
     Ok(())
+}
+
+/// Preserve config files by copying them to `.grelnew` backups.
+/// Only called when `nosave = false`.
+fn preserve_config_files(install_path: &std::path::Path) {
+    const CONFIG_EXTS: &[&str] = &["toml", "conf", "yaml", "yml", "json", "ini", "cfg"];
+
+    let backup_dir = install_path.with_extension("grelnew");
+    let mut preserved = 0;
+
+    fn walk(
+        dir: &std::path::Path,
+        install_path: &std::path::Path,
+        backup_dir: &std::path::Path,
+        config_exts: &[&str],
+        preserved: &mut usize,
+    ) {
+        let Ok(entries) = std::fs::read_dir(dir) else { return };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, install_path, backup_dir, config_exts, preserved);
+            } else if path.is_file() {
+                let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+                if config_exts.contains(&ext) {
+                    let relative = path.strip_prefix(install_path).unwrap_or(&path);
+                    let dest = backup_dir.join(relative);
+                    if let Some(parent) = dest.parent() {
+                        std::fs::create_dir_all(parent).ok();
+                    }
+                    if std::fs::copy(&path, dest).is_ok() {
+                        *preserved += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    walk(install_path, install_path, &backup_dir, CONFIG_EXTS, &mut preserved);
+
+    if preserved > 0 {
+        println!(
+            "  Preserved {preserved} config file(s) to {}",
+            backup_dir.display()
+        );
+    }
 }

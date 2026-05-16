@@ -293,8 +293,8 @@ impl Database {
             r#"
             INSERT INTO installed
                 (forge, owner, repo, version, asset_filename, checksum, install_path,
-                 installed_binaries, is_managed, status, orphaned_at, last_checked, manifest_source)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 installed_binaries, is_managed, status, orphaned_at, last_checked, manifest_source, is_explicit)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(forge, owner, repo) DO UPDATE SET
                 version = excluded.version,
                 asset_filename = excluded.asset_filename,
@@ -305,7 +305,8 @@ impl Database {
                 status = excluded.status,
                 orphaned_at = excluded.orphaned_at,
                 last_checked = excluded.last_checked,
-                manifest_source = excluded.manifest_source
+                manifest_source = excluded.manifest_source,
+                is_explicit = excluded.is_explicit
             "#,
         )
         .bind(&pkg.forge)
@@ -321,6 +322,7 @@ impl Database {
         .bind(pkg.orphaned_at)
         .bind(pkg.last_checked)
         .bind(pkg.manifest_source.to_string())
+        .bind(pkg.is_explicit)
         .execute(&self.pool)
         .await?;
 
@@ -665,6 +667,37 @@ impl Database {
         .await?;
 
         Ok(())
+    }
+
+    /// Remove ETag cache entries older than 30 days.
+    pub async fn clean_etag_cache(&self) -> Result<u64, DatabaseError> {
+        let result = sqlx::query(
+            "DELETE FROM etag_cache WHERE last_modified < strftime('%s', 'now') - 86400 * 30",
+        )
+        .execute(&self.pool)
+        .await?;
+
+        Ok(result.rows_affected())
+    }
+
+    /// Remove expired DNS cache entries.
+    pub async fn clean_dns_cache(&self) -> Result<u64, DatabaseError> {
+        let result = sqlx::query(
+            "DELETE FROM dns_cache WHERE expires_at < strftime('%s', 'now')",
+        )
+        .execute(&self.pool)
+        .await?;
+
+        Ok(result.rows_affected())
+    }
+
+    /// Run SQLite PRAGMA integrity_check
+    pub async fn check_integrity(&self) -> Result<String, DatabaseError> {
+        let row = sqlx::query("PRAGMA integrity_check")
+            .fetch_one(&self.pool)
+            .await?;
+
+        Ok(row.get::<String, _>("integrity_check"))
     }
 
     /// Close the database connection

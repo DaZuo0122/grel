@@ -77,7 +77,18 @@ pub async fn cmd_db_clean(ctx: &CommandContext<'_>) -> Result<()> {
     }
 
     println!("Removed {removed} orphaned package(s)");
-    println!("  {}", "ETag/IP cache cleanup not yet implemented".yellow());
+
+    // Clean stale ETag cache (older than 30 days)
+    match db.clean_etag_cache().await {
+        Ok(count) => println!("  Cleaned {count} stale ETag entries"),
+        Err(e) => eprintln!("  Warning: failed to clean ETag cache: {e}"),
+    }
+
+    // Clean expired DNS cache
+    match db.clean_dns_cache().await {
+        Ok(count) => println!("  Cleaned {count} expired DNS entries"),
+        Err(e) => eprintln!("  Warning: failed to clean DNS cache: {e}"),
+    }
 
     db.close().await;
     Ok(())
@@ -87,9 +98,22 @@ pub async fn cmd_db_clean(ctx: &CommandContext<'_>) -> Result<()> {
 pub async fn cmd_db_check(ctx: &CommandContext<'_>) -> Result<()> {
     let db = ctx.db().await?;
 
-    let count = db.list_packages().await?.len();
-    println!("Database integrity check: {} package records found", count);
-    println!("{}", "Database appears healthy".green());
+    match db.check_integrity().await {
+        Ok(result) if result == "ok" => {
+            let count = db.list_packages().await?.len();
+            println!("Database integrity check: {} package records found", count);
+            println!("{}", "Database appears healthy".green());
+        }
+        Ok(result) => {
+            println!("{}", "Database integrity check FAILED".red());
+            for line in result.lines() {
+                println!("  {line}");
+            }
+        }
+        Err(e) => {
+            println!("{}", format!("Failed to run integrity check: {e}").red());
+        }
+    }
 
     db.close().await;
     Ok(())
