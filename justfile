@@ -1,7 +1,7 @@
 # Local test entrypoints for grel.
 # Keep CI wiring separate; these recipes are for developer workflows.
 
-set windows-shell := ["powershell.exe", "-NoLogo", "-NoProfile", "-Command"]
+set shell := ["sh", "-cu"]
 
 default:
     @just --list
@@ -38,7 +38,7 @@ test-integration:
 test-live:
     cargo test --test integration -- --ignored --nocapture
 
-test-offline: test-unit test-cli test-integration
+test-offline: test-unit test-cli test-integration test-regression
 
 test-all: test-offline test-live
 
@@ -49,3 +49,7 @@ test-crate crate:
 
 test-filter filter:
     cargo test --workspace {{filter}} -- --nocapture
+
+# Run the full shell-based CLI regression suite
+test-regression:
+    @sh tests/regression_cli.sh

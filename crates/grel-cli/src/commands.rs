@@ -254,7 +254,7 @@ pub struct Cli {
     #[arg(long, action = clap::ArgAction::SetTrue, help = "Verify SQLite DB integrity (with -D)")]
     pub db_check: bool,
 
-    #[arg(long, action = clap::ArgAction::SetTrue, help = "Export state as JSON (with -D)")]
+    #[arg(long = "dump", action = clap::ArgAction::SetTrue, help = "Export state as JSON (with -D)")]
     pub db_dump: bool,
 
     // -----------------------------------------------------------------------
