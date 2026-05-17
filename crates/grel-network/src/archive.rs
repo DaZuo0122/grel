@@ -64,10 +64,6 @@ pub fn install_asset(
             extract_tar_xz(archive_path, install_dir)?;
             link_binaries(install_dir, bin_dir, asset_filename, overwrite)
         }
-        ArchiveType::TarBz2 => {
-            extract_tar_bz2(archive_path, install_dir)?;
-            link_binaries(install_dir, bin_dir, asset_filename, overwrite)
-        }
         ArchiveType::Plain => {
             install_plain_binary(archive_path, install_dir, bin_dir, asset_filename)
         }
@@ -81,7 +77,6 @@ enum ArchiveType {
     TarGz,
     Tgz,
     TarXz,
-    TarBz2,
     Plain,
 }
 
@@ -95,8 +90,6 @@ fn extract_extension(filename: &str) -> ArchiveType {
         ArchiveType::Tgz
     } else if lower.ends_with(".tar.xz") {
         ArchiveType::TarXz
-    } else if lower.ends_with(".tar.bz2") || lower.ends_with(".tbz2") {
-        ArchiveType::TarBz2
     } else {
         ArchiveType::Plain
     }
@@ -214,58 +207,6 @@ fn extract_tar_xz(archive_path: &Path, install_dir: &Path) -> Result<(), Network
         .map_err(|e| NetworkError::OperationFailed(format!("Failed to open archive: {e}")))?;
 
     let decoder = xz2::read::XzDecoder::new(tar_xz_file);
-    let mut archive = tar::Archive::new(decoder);
-
-    let entries = archive
-        .entries()
-        .map_err(|e| NetworkError::OperationFailed(format!("Invalid tar archive: {e}")))?;
-
-    for entry_result in entries {
-        let mut entry = entry_result
-            .map_err(|e| NetworkError::OperationFailed(format!("Failed to read tar entry: {e}")))?;
-
-        let path = entry
-            .path()
-            .map_err(|e| NetworkError::OperationFailed(format!("Invalid path in archive: {e}")))?
-            .to_path_buf();
-
-        let safe_path = sanitize_tar_path(&path)?;
-        if safe_path.is_empty() || safe_path.contains("..") {
-            continue;
-        }
-
-        let full_path = out_dir.join(&safe_path);
-
-        if entry.header().entry_type().is_dir() {
-            std::fs::create_dir_all(&full_path).map_err(|e| {
-                NetworkError::OperationFailed(format!("Failed to create directory: {e}"))
-            })?;
-        } else {
-            if let Some(parent) = full_path.parent() {
-                std::fs::create_dir_all(parent).map_err(|e| {
-                    NetworkError::OperationFailed(format!("Failed to create directory: {e}"))
-                })?;
-            }
-
-            entry.unpack(&full_path).map_err(|e| {
-                NetworkError::OperationFailed(format!("Failed to extract file: {e}"))
-            })?;
-        }
-    }
-
-    Ok(())
-}
-
-/// Extract a tar.bz2 archive into `<install_dir>/extracted/`
-fn extract_tar_bz2(archive_path: &Path, install_dir: &Path) -> Result<(), NetworkError> {
-    let out_dir = install_dir.join("extracted");
-    std::fs::create_dir_all(&out_dir)
-        .map_err(|e| NetworkError::OperationFailed(format!("Failed to create extract dir: {e}")))?;
-
-    let tar_bz2_file = std::fs::File::open(archive_path)
-        .map_err(|e| NetworkError::OperationFailed(format!("Failed to open archive: {e}")))?;
-
-    let decoder = bzip2::read::BzDecoder::new(tar_bz2_file);
     let mut archive = tar::Archive::new(decoder);
 
     let entries = archive

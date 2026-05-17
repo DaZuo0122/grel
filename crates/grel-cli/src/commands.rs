@@ -131,14 +131,14 @@ pub struct Cli {
     )]
     pub sysupgrade: bool,
 
-    /// -i: Show info (used with -S or -Q). Target package(s) come from positional TARGETS.
+    /// -i: Show info (used with -S or -Q)
     #[arg(
         short = 'i',
         long,
-        action = clap::ArgAction::SetTrue,
-        help = "Show package info (with -S: remote, with -Q: local)"
+        help = "Show package info (with -S: remote, with -Q: local)",
+        value_name = "PKG"
     )]
-    pub info: bool,
+    pub info: Option<String>,
 
     /// -c: Clean (used with -S) or cascade (used with -R)
     #[arg(
@@ -150,13 +150,14 @@ pub struct Cli {
     // -----------------------------------------------------------------------
     // -Q (query) sub-options
     // -----------------------------------------------------------------------
-    /// -l: List files (used with -Q or -F). Target package (optional) comes from positional TARGETS.
+    /// -l: List files (used with -Q or -F). Optional package name.
     #[arg(
         short = 'l', long,
-        action = clap::ArgAction::SetTrue,
-        help = "List files (with -Q or -F). Optional target package via positional arg."
+        help = "List files (with -Q or -F). Optional package name.",
+        num_args = 0..=1,
+        value_name = "PKG"
     )]
-    pub list: bool,
+    pub list: Vec<String>,
 
     /// -o: Owns (used with -Q)
     #[arg(
@@ -183,7 +184,7 @@ pub struct Cli {
 
     /// -d: List packages installed as dependencies
     #[arg(
-        short = 'd', long = "deps", action = clap::ArgAction::SetTrue,
+        short = 'd', long, action = clap::ArgAction::SetTrue,
         help = "List packages installed as dependencies (with -Q)"
     )]
     pub deps_filter: bool,
