@@ -14,10 +14,10 @@ Operations are mutually exclusive. Options can be combined without spaces (e.g.,
 
 | Flag | Long | Description |
 |------|------|-------------|
-| `-s` | `--search <pattern>` | Search registered forges for packages |
+| `-s <pattern>` | `--search <pattern>` | Search registered forges for packages |
 | `-y` | `--refresh` | Force-refresh forge metadata, IP cache, and ETags |
 | `-u` | `--sysupgrade` | Upgrade all installed packages to latest matching releases |
-| `-i` | `--info <pkg>` | Show release metadata before installing |
+| `-i` | `--info` | Show release metadata for TARGET before installing |
 | `-c` | `--clean` | Purge downloaded artifacts from cache |
 | `--dry-run` | | Simulate resolution/download without writing files |
 | `--noconfirm` | | Skip all interactive prompts & warnings |
@@ -34,9 +34,8 @@ Operations are mutually exclusive. Options can be combined without spaces (e.g.,
 - `grel -Ss ripgrep` → Search for `ripgrep`
 - `grel -Sy` → Refresh metadata only
 - `grel -Su` → Upgrade installed (uses cached metadata)
-- `grel -Syu` → Refresh + Upgrade (standard update)
-- `grel -Ssc` → Search + Clean cache
-- `grel -Si foo/bar` → Show remote release info
+- `grel -Syu` → Refresh first, then upgrade (standard update)
+- `grel -Si foo/bar` → Show remote release info for `foo/bar`
 - `grel -S --asdeps foo/bar` → Install as dependency
 
 ---
@@ -46,21 +45,22 @@ Operations are mutually exclusive. Options can be combined without spaces (e.g.,
 | Flag | Long | Description |
 |------|------|-------------|
 | (none) | | List all installed packages |
-| `-l` | `--list [<pkg>]` | List files owned by an installed package (no arg = all packages) |
-| `-i` | `--info <pkg>` | Show detailed info of an installed package |
-| `-o` | `--owns <path>` | Find which package owns a binary/file |
+| `-l` | `--list` | List files owned by TARGET (or all packages if no target) |
+| `-i` | `--info` | Show detailed info of TARGET package |
+| `-o <path>` | `--owns <path>` | Find which package owns a binary/file |
 | `-q` | `--quiet` | Output minimal data (package names only) |
 | `-e` | `--explicit` | Filter to manually installed packages |
 | `-d` | `--deps` | Filter to packages installed as dependencies |
 | `-t` | `--unrequired` | Show packages not required by any other (orphans) |
 | `-k` | `--check` | Verify checksums of installed binaries |
-| `-s` | `--search <pattern>` | Search locally installed packages by name |
+| `-s <pattern>` | `--search <pattern>` | Search locally installed packages by name |
 
 **Common Combos:**
-- `grel -Q` → List installed
+- `grel -Q` → List all installed
 - `grel -Ql` → List files for all packages
 - `grel -Ql foo/bar` → List files owned by foo/bar
-- `grel -Qi foo/bar` → Show local install info
+- `grel -Qi foo/bar` → Show local install info for foo/bar
+- `grel -Q foo/bar` → Show local info for foo/bar (same as -Qi)
 - `grel -Qo rg` → Which package provides `rg`?
 - `grel -Qeq` → List explicitly installed, quiet mode
 - `grel -Qd` → List dependency-installed packages
@@ -81,9 +81,11 @@ Operations are mutually exclusive. Options can be combined without spaces (e.g.,
 | `--noconfirm` | | Skip removal confirmation |
 | `--dry-run` | | Show what would be removed |
 
+> **Note:** pacman uses `-Rs` for recursive dep removal; grel uses `-Rr` to avoid conflict with the shared `-s` (search) flag.
+
 **Common Combos:**
 - `grel -R foo/bar` → Uninstall
-- `grel -Rcns foo/bar` → Cascade + Recursive + Nosave
+- `grel -Rcn foo/bar` → Cascade + Nosave
 - `grel -Rn foo/bar` → Remove, keep extracted binaries
 - `grel -Ru` → Remove all unneeded packages
 
@@ -93,17 +95,17 @@ Operations are mutually exclusive. Options can be combined without spaces (e.g.,
 
 | Flag | Long | Description |
 |------|------|-------------|
-| `--asexplicit <pkg>` | | Mark package as manually installed |
-| `--asdeps <pkg>` | | Mark package as a dependency |
+| `--asexplicit` | | Mark package as manually installed |
+| `--asdeps` | | Mark package as a dependency |
 | `--migrate <old> <new>` | | Update `owner/repo` path for renamed projects |
-| `--clean` | | Prune orphaned records, clear stale ETags/IP cache |
-| `--check` | | Verify SQLite DB integrity |
+| `--clean` | `-c` | Prune orphaned records, clear stale ETags/IP cache |
+| `--check` | `-k` | Verify SQLite DB integrity |
 | `--dump` | | Export state as JSON (debug/scripting) |
 
 **Common Combos:**
-- `grel -D --migrate old/org/tool new/org/tool`
-- `grel -D --clean`
-- `grel -D --check`
+- `grel -D --migrate old-org/tool new-org/tool`
+- `grel -D --clean` (or `grel -Dc`)
+- `grel -Dk` → Verify database integrity
 
 ---
 
@@ -125,8 +127,8 @@ Operations are mutually exclusive. Options can be combined without spaces (e.g.,
 
 | Flag | Long | Description |
 |------|------|-------------|
-| `-s` | `--search <pattern>` | Search installed packages for a filename/binary |
-| `-l` | `--list <pkg>` | List all files extracted by a package |
+| `-s <pattern>` | `--search <pattern>` | Search installed packages for a filename/binary |
+| `-l` | `--list` | List all files extracted by TARGET package |
 | `-y` | `--refresh` | Rebuild file index from installed packages |
 | `-q` | `--quiet` | Output only matching paths |
 
@@ -147,8 +149,26 @@ Operations are mutually exclusive. Options can be combined without spaces (e.g.,
    ```
 4. **Conflict Handling:**
    - `--dry-run` + `--noconfirm` → `--dry-run` wins, no prompts shown
-   - `-c` (clean) in `-S` vs `-D` → `-S -c` cleans artifacts, `-D --clean` prunes DB/cache
+   - `-c` (clean) in `-S` vs `-D` → `-Sc` cleans artifacts, `-Dc` prunes DB/cache
+   - `-c` (cascade) in `-R` → removes unneeded deps
    - `--overwrite` required if destination file exists and checksum differs
+5. **`-Syu` order:** refresh is performed first, then upgrade. `-Su` upgrades using cached metadata.
+6. **`-i` and `-l` flags** take their target package from positional `TARGETS`, not as a flag value.
+   - `grel -Si foo/bar` ✅ — `-i` is a bool; `foo/bar` is the positional target
+   - `grel -Ql foo/bar` ✅ — `-l` is a bool; `foo/bar` is the positional target
+   - `grel -Ql` ✅ — `-l` with no target lists files for all packages
+
+---
+
+## 🗜️ Supported Archive Formats
+
+| Format | Extension(s) | Notes |
+|--------|-------------|-------|
+| Zip | `.zip` | |
+| Gzip tar | `.tar.gz`, `.tgz` | |
+| XZ tar | `.tar.xz` | |
+| Bzip2 tar | `.tar.bz2`, `.tbz2` | |
+| Plain binary | (any other) | chmod +x on Unix, linked to bin_dir |
 
 ---
 
@@ -157,7 +177,7 @@ Operations are mutually exclusive. Options can be combined without spaces (e.g.,
 | CLI Layer | Routes To |
 |-----------|-----------|
 | `-S/-U` | `grel-cli` → `grel-core/resolver` → `grel-network/download` → `grel-cache/install` |
-| `-Syu` | `grel-core/upgrade` (ETag check → diff → parallel download → atomic replace) |
+| `-Syu` | refresh (`cmd_sync_refresh`) → upgrade (`cmd_upgrade`) |
 | `-Q/-F` | `grel-cache/sqlite` (read-only queries, index lookups) |
 | `-R/-D` | `grel-cache/state` (DB updates, orphan marking, migration, cleanup) |
 | `--asset/--platform` | `grel-core/asset_resolver` (bypass filters, force selection) |

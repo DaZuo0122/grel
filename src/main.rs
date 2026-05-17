@@ -76,7 +76,7 @@ async fn main() -> Result<()> {
                 println!("  -s, --search <PATTERN>   Search forges for packages");
                 println!("  -y, --refresh            Refresh forge metadata and caches");
                 println!("  -u, --sysupgrade         Upgrade all installed packages");
-                println!("  -i, --info <PKG>         Show release metadata before installing");
+                println!("  -i, --info               Show release metadata (with target pkg)");
                 println!("  -c, --clean              Purge downloaded artifacts from cache");
                 println!("      --dry-run            Simulate without writing files");
                 println!("      --noconfirm          Skip interactive prompts");
@@ -98,12 +98,12 @@ async fn main() -> Result<()> {
                 println!("Usage: grel -Q [OPTIONS] [TARGETS...]");
                 println!();
                 println!("Options:");
-                println!("  -l, --list [<PKG>]       List files owned by a package");
-                println!("  -i, --info <PKG>         Show detailed local package info");
+                println!("  -l, --list [TARGET]      List files owned by a package (or all)");
+                println!("  -i, --info               Show detailed local package info (with target)");
                 println!("  -o, --owns <PATH>        Find which package owns a file");
                 println!("  -q, --quiet              Minimal output (names only)");
                 println!("  -e, --explicit           Filter to manually installed packages");
-                println!("  -d, --deps-filter        Filter to dependency-installed packages");
+                println!("  -d, --deps               Filter to dependency-installed packages");
                 println!("  -t, --unrequired         List packages not required by any other");
                 println!("  -k, --check              Verify checksums of installed archives");
                 println!("  -s, --search <PATTERN>   Search locally installed packages");
@@ -215,12 +215,16 @@ async fn main() -> Result<()> {
     // Route by operation (first wins)
     match cli.operation() {
         Operation::Sync => {
-            if cli.sysupgrade {
+            if cli.sysupgrade && cli.refresh {
+                commands::sync::cmd_sync_refresh(&ctx).await?;
+                commands::sync::cmd_upgrade(&ctx).await?;
+            } else if cli.sysupgrade {
                 commands::sync::cmd_upgrade(&ctx).await?;
             } else if let Some(ref pattern) = cli.search {
                 commands::sync::cmd_search(&ctx, pattern.clone(), 20).await?;
-            } else if let Some(ref pkg) = cli.info {
-                commands::query::cmd_info_remote(&ctx, pkg.clone()).await?;
+            } else if cli.info {
+                let pkg = cli.targets.first().cloned().unwrap_or_default();
+                commands::query::cmd_info_remote(&ctx, pkg).await?;
             } else if cli.refresh {
                 commands::sync::cmd_sync_refresh(&ctx).await?;
             } else if cli.clean {
@@ -234,21 +238,22 @@ async fn main() -> Result<()> {
                 commands::query::cmd_list_unrequired(&ctx).await?;
             } else if cli.orphans {
                 commands::query::cmd_list_orphans(&ctx).await?;
-            } else if let Some(ref pkg) = cli.info {
-                commands::query::cmd_info_local(&ctx, pkg.clone()).await?;
+            } else if cli.info {
+                let pkg = cli.targets.first().cloned().unwrap_or_default();
+                commands::query::cmd_info_local(&ctx, pkg).await?;
             } else if let Some(ref path) = cli.owns {
                 commands::query::cmd_owns(&ctx, path.clone()).await?;
             } else if cli.check {
                 commands::query::cmd_verify_checksums(&ctx).await?;
             } else if let Some(ref pattern) = cli.search {
                 commands::query::cmd_local_search(&ctx, pattern.clone()).await?;
-            } else if !cli.list.is_empty() || !cli.targets.is_empty() {
-                let pkg = cli
-                    .list
-                    .first()
-                    .or_else(|| cli.targets.first())
-                    .map(|s| s.as_str());
+            } else if cli.list {
+                let pkg = cli.targets.first().map(|s| s.as_str());
                 commands::query::cmd_list_files(&ctx, pkg).await?;
+            } else if !cli.targets.is_empty() {
+                // -Q foo/bar (no sub-flag): show local info, like pacman -Q <pkg>
+                let pkg = cli.targets.first().cloned().unwrap_or_default();
+                commands::query::cmd_info_local(&ctx, pkg).await?;
             } else {
                 commands::query::cmd_list(&ctx).await?;
             }
@@ -290,8 +295,8 @@ async fn main() -> Result<()> {
         Operation::Files => {
             if let Some(ref pattern) = cli.search {
                 commands::files::cmd_file_search(&ctx, pattern.clone()).await?;
-            } else if !cli.list.is_empty() || !cli.targets.is_empty() {
-                let Some(pkg) = cli.list.first().or_else(|| cli.targets.first()) else {
+            } else if cli.list || !cli.targets.is_empty() {
+                let Some(pkg) = cli.targets.first() else {
                     eprintln!("Usage: grel -Fl <package>");
                     return Ok(());
                 };
