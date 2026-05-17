@@ -355,28 +355,71 @@ pub async fn cmd_owns(ctx: &CommandContext<'_>, path: String) -> Result<()> {
     let packages = db.list_packages().await?;
 
     let query = std::path::Path::new(&path);
+    let query_name = query.file_name();
     let query_canon = query.canonicalize().ok();
+
+    #[cfg(debug_assertions)]
+    eprintln!("[owns] query='{}' name={:?} canon={:?}", path, query_name, query_canon);
 
     let mut found = Vec::new();
     for pkg in &packages {
         let install_path = std::path::Path::new(&pkg.install_path);
 
-        // Candidate 1: linked binaries in bin_dir
+        #[cfg(debug_assertions)]
+        eprintln!(
+            "[owns] pkg={} install_path={} exists={} binaries={:?}",
+            pkg.package_ref(),
+            install_path.display(),
+            install_path.exists(),
+            pkg.binary_list(),
+        );
+
         let mut matched = false;
+
+        // Candidate 1: linked binaries in bin_dir
         for bin_name in pkg.binary_list() {
             let bin_path = ctx.config.paths.bin_dir.join(&bin_name);
+            #[cfg(debug_assertions)]
+            eprintln!("[owns]   bin_check={}", bin_path.display());
             if path_matches(&bin_path, query, query_canon.as_deref()) {
+                #[cfg(debug_assertions)]
+                eprintln!("[owns]   -> MATCHED via binary_list");
                 matched = true;
                 break;
             }
         }
 
-        // Candidate 2: install directory itself
+        // Candidate 2: files inside the install directory (walk it)
+        if !matched && install_path.exists() {
+            let files = walkdir_for_owns(install_path);
+            #[cfg(debug_assertions)]
+            eprintln!("[owns]   walkdir found {} files", files.len());
+            for file in &files {
+                #[cfg(debug_assertions)]
+                eprintln!(
+                    "[owns]     file={} name={:?}",
+                    file.display(),
+                    file.file_name()
+                );
+            }
+            for file in files {
+                if path_matches(&file, query, query_canon.as_deref()) {
+                    #[cfg(debug_assertions)]
+                    eprintln!("[owns]   -> MATCHED via walkdir");
+                    matched = true;
+                    break;
+                }
+            }
+        }
+
+        // Candidate 3: install directory itself
         if !matched && path_matches(install_path, query, query_canon.as_deref()) {
+            #[cfg(debug_assertions)]
+            eprintln!("[owns]   -> MATCHED via install_path");
             matched = true;
         }
 
-        // Candidate 3: archive file
+        // Candidate 4: archive file
         if !matched {
             let archive_path = if install_path.ends_with(&pkg.asset_filename) {
                 install_path.to_path_buf()
@@ -384,7 +427,26 @@ pub async fn cmd_owns(ctx: &CommandContext<'_>, path: String) -> Result<()> {
                 install_path.join(&pkg.asset_filename)
             };
             if path_matches(&archive_path, query, query_canon.as_deref()) {
+                #[cfg(debug_assertions)]
+                eprintln!("[owns]   -> MATCHED via archive");
                 matched = true;
+            }
+        }
+
+        // Candidate 5: filename-only fallback (also matches stems, e.g. "rg" → "rg.exe")
+        if !matched && query_name.is_some() {
+            if let Some(q_name) = query_name {
+                if install_path.exists() {
+                    let files = walkdir_for_owns(install_path);
+                    for file in files {
+                        if filename_matches(file.file_name(), Some(q_name)) {
+                            #[cfg(debug_assertions)]
+                            eprintln!("[owns]   -> MATCHED via filename fallback");
+                            matched = true;
+                            break;
+                        }
+                    }
+                }
             }
         }
 
@@ -403,6 +465,28 @@ pub async fn cmd_owns(ctx: &CommandContext<'_>, path: String) -> Result<()> {
 
     db.close().await;
     Ok(())
+}
+
+/// Walk a directory recursively, returning all file paths.
+/// Lightweight version for cmd_owns (does not use Result).
+fn walkdir_for_owns(path: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut result = Vec::new();
+    if path.is_file() {
+        result.push(path.to_path_buf());
+        return result;
+    }
+    let Ok(entries) = std::fs::read_dir(path) else {
+        return result;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            result.extend(walkdir_for_owns(&path));
+        } else {
+            result.push(path);
+        }
+    }
+    result
 }
 
 /// Check if a candidate path matches the query path.
@@ -424,13 +508,32 @@ fn path_matches(
             }
         }
     }
-    // Fallback: check if query ends with the candidate filename
-    if let (Some(q_name), Some(c_name)) = (query.file_name(), candidate.file_name()) {
-        if q_name == c_name {
-            return true;
-        }
+    // Fallback: check filenames (including stem match for .exe etc.)
+    if filename_matches(candidate.file_name(), query.file_name()) {
+        return true;
     }
     false
+}
+
+/// Check whether two filename OsStrs match.
+/// Matches exact names or stems (e.g. "rg" matches "rg.exe" on Windows).
+fn filename_matches(a: Option<&std::ffi::OsStr>, b: Option<&std::ffi::OsStr>) -> bool {
+    let (Some(a), Some(b)) = (a, b) else {
+        return false;
+    };
+    if a == b {
+        return true;
+    }
+    // Compare stems: "rg" should match "rg.exe"
+    let a_str = a.to_string_lossy();
+    let b_str = b.to_string_lossy();
+    let a_stem = std::path::Path::new(&*a_str)
+        .file_stem()
+        .map(|s| s.to_string_lossy());
+    let b_stem = std::path::Path::new(&*b_str)
+        .file_stem()
+        .map(|s| s.to_string_lossy());
+    a_stem == b_stem
 }
 
 /// Verify checksums of installed files
