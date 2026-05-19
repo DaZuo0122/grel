@@ -86,6 +86,8 @@ async fn main() -> Result<()> {
                 println!("      --allow-format <FMT> Temporarily allow normally ignored formats");
                 println!("      --asdeps             Install packages as dependencies");
                 println!("      --asexplicit         Install packages as explicitly installed");
+                println!("      --needed             Skip reinstall if already up-to-date");
+                println!("  -w, --download-only      Download without installing");
                 println!();
                 println!("Examples:");
                 println!("  grel -S foo/bar          Install latest release");

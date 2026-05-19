@@ -147,6 +147,20 @@ pub struct Cli {
     )]
     pub clean: bool,
 
+    /// -w: Download only (with -S)
+    #[arg(
+        short = 'w', long, action = clap::ArgAction::SetTrue,
+        help = "Download packages without installing (with -S)"
+    )]
+    pub download_only: bool,
+
+    /// --needed: Skip reinstall if up-to-date (with -S)
+    #[arg(
+        long, action = clap::ArgAction::SetTrue,
+        help = "Skip reinstall if package is already up-to-date (with -S)"
+    )]
+    pub needed: bool,
+
     // -----------------------------------------------------------------------
     // -Q (query) sub-options
     // -----------------------------------------------------------------------

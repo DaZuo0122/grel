@@ -152,6 +152,8 @@ async fn install_single_package(
     dry_run: bool,
     is_explicit: bool,
     overwrite: bool,
+    download_only: bool,
+    needed: bool,
 ) -> Result<i64, anyhow::Error> {
     println!("\n{}", format!("→ {}", pkg_ref.to_short_ref()).bold());
 
@@ -269,7 +271,31 @@ async fn install_single_package(
         }
     };
 
-    let is_managed = is_asset_managed(&chosen_asset, &config.assets);
+    let is_managed = if download_only {
+        false
+    } else {
+        is_asset_managed(&chosen_asset, &config.assets)
+    };
+
+    if needed {
+        if let Ok(Some(existing)) = db
+            .get_package(&pkg_ref.forge.to_string(), &pkg_ref.owner, &pkg_ref.repo)
+            .await
+        {
+            if existing.version == release.tag {
+                println!(
+                    "  {}",
+                    format!(
+                        "{} {} is up-to-date -- skipping",
+                        pkg_ref.to_short_ref(),
+                        release.tag
+                    )
+                    .dimmed()
+                );
+                return Ok(existing.id.unwrap_or(-1));
+            }
+        }
+    }
 
     let install_dir = if is_managed {
         config.paths.install_root.join(format!(
@@ -378,10 +404,17 @@ async fn install_single_package(
         .await?
         .ok_or_else(|| anyhow::anyhow!("Package not found after upsert"))?;
 
-    println!(
-        "  {}",
-        format!("Installed {} v{}", pkg_ref.to_short_ref(), release.tag).green()
-    );
+    if download_only {
+        println!(
+            "  {}",
+            format!("Downloaded {} v{}", pkg_ref.to_short_ref(), release.tag).green()
+        );
+    } else {
+        println!(
+            "  {}",
+            format!("Installed {} v{}", pkg_ref.to_short_ref(), release.tag).green()
+        );
+    }
 
     Ok(updated_pkg.id.unwrap_or(-1))
 }
@@ -767,7 +800,32 @@ pub async fn cmd_sync(ctx: &CommandContext<'_>, packages: &[String]) -> Result<(
             );
         }
 
-        let is_managed = is_asset_managed(&chosen_asset, &ctx.config.assets);
+        let is_managed = if ctx.cli.download_only {
+            false
+        } else {
+            is_asset_managed(&chosen_asset, &ctx.config.assets)
+        };
+
+        // --needed: skip if already installed at this version
+        if ctx.cli.needed {
+            if let Ok(Some(existing)) = db
+                .get_package(&pkg_ref.forge.to_string(), &pkg_ref.owner, &pkg_ref.repo)
+                .await
+            {
+                if existing.version == release.tag {
+                    println!(
+                        "  {}",
+                        format!(
+                            "{} {} is up-to-date -- skipping",
+                            pkg_ref.to_short_ref(),
+                            release.tag
+                        )
+                        .dimmed()
+                    );
+                    continue;
+                }
+            }
+        }
 
         let install_dir = if is_managed {
             ctx.config.paths.install_root.join(format!(
@@ -843,7 +901,9 @@ pub async fn cmd_sync(ctx: &CommandContext<'_>, packages: &[String]) -> Result<(
             .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
             .collect();
 
-        check_elf_deps(&installed_binaries, ctx, &db).await;
+        if !ctx.cli.download_only {
+            check_elf_deps(&installed_binaries, ctx, &db).await;
+        }
 
         if is_managed && !ctx.config.general.keep_archives && archive_path.exists() {
             std::fs::remove_file(&archive_path).ok();
@@ -906,6 +966,8 @@ pub async fn cmd_sync(ctx: &CommandContext<'_>, packages: &[String]) -> Result<(
                         ctx.cli.dry_run,
                         false,
                         ctx.cli.overwrite,
+                        ctx.cli.download_only,
+                        ctx.cli.needed,
                     )
                     .await
                     {
@@ -955,10 +1017,17 @@ pub async fn cmd_sync(ctx: &CommandContext<'_>, packages: &[String]) -> Result<(
             }
         }
 
-        println!(
-            "  {}",
-            format!("Installed {} v{}", pkg_ref.to_short_ref(), release.tag).green()
-        );
+        if ctx.cli.download_only {
+            println!(
+                "  {}",
+                format!("Downloaded {} v{}", pkg_ref.to_short_ref(), release.tag).green()
+            );
+        } else {
+            println!(
+                "  {}",
+                format!("Installed {} v{}", pkg_ref.to_short_ref(), release.tag).green()
+            );
+        }
     }
 
     db.close().await;
@@ -1143,19 +1212,35 @@ pub async fn cmd_sync_refresh(ctx: &CommandContext<'_>) -> Result<()> {
 
 /// Clean artifact cache
 pub async fn cmd_clean_cache(ctx: &CommandContext<'_>) -> Result<()> {
-    println!("{}", "Cleaning download cache...".bold());
+    println!("{}", "Cleaning artifact cache...".bold());
 
     let db = ctx.db().await?;
     let packages = db.list_packages().await?;
-    let active_paths: std::collections::HashSet<String> = packages
-        .iter()
+    let active_packages: Vec<_> = packages
+        .into_iter()
         .filter(|p| matches!(p.status, models::PackageStatus::Active))
-        .map(|p| p.install_path.clone())
         .collect();
 
-    let download_dir = &ctx.config.paths.download_dir;
+    // Build set of valid archive paths for active managed packages
+    // Build set of valid archive paths for active managed packages
+    let _valid_archives: std::collections::HashSet<std::path::PathBuf> = active_packages
+        .iter()
+        .filter(|p| p.is_managed)
+        .map(|p| {
+            std::path::PathBuf::from(&p.install_path).join(&p.asset_filename)
+        })
+        .collect();
+
     let mut removed = 0;
     let mut failed = 0;
+
+    // Clean download_dir
+    let download_dir = &ctx.config.paths.download_dir;
+    let active_download_paths: std::collections::HashSet<String> = active_packages
+        .iter()
+        .filter(|p| !p.is_managed)
+        .map(|p| p.install_path.clone())
+        .collect();
 
     if download_dir.exists() {
         for entry in std::fs::read_dir(download_dir)? {
@@ -1163,8 +1248,43 @@ pub async fn cmd_clean_cache(ctx: &CommandContext<'_>) -> Result<()> {
             let path = entry.path();
             let path_str = path.to_string_lossy().to_string();
 
-            if !active_paths.contains(&path_str) {
+            if !active_download_paths.contains(&path_str) {
                 if path.is_file() {
+                    match std::fs::remove_file(&path) {
+                        Ok(_) => removed += 1,
+                        Err(_) => failed += 1,
+                    }
+                }
+            }
+        }
+    }
+
+    // Clean old archives under install_root for managed packages
+    for pkg in &active_packages {
+        if !pkg.is_managed {
+            continue;
+        }
+        let pkg_dir = std::path::PathBuf::from(&pkg.install_path);
+        if !pkg_dir.exists() || !pkg_dir.is_dir() {
+            continue;
+        }
+        let expected_archive = pkg_dir.join(&pkg.asset_filename);
+        for entry in std::fs::read_dir(&pkg_dir)? {
+            let entry = match entry {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+            let path = entry.path();
+            if path.is_file() && path != expected_archive {
+                // Only remove files that look like release archives
+                let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                let is_archive = matches!(ext, "gz" | "xz" | "zip" | "bz2" | "zst" | "7z")
+                    || name.ends_with(".tar.gz")
+                    || name.ends_with(".tar.xz")
+                    || name.ends_with(".tar.bz2")
+                    || name.ends_with(".tar.zst");
+                if is_archive {
                     match std::fs::remove_file(&path) {
                         Ok(_) => removed += 1,
                         Err(_) => failed += 1,
