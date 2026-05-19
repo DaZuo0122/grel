@@ -1,3 +1,5 @@
+> **Note:** This is a historical audit from 2026-05-09. Many issues listed here have since been fixed. For current CLI behavior, see [COMMANDS.md](COMMANDS.md) and [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md).
+
 # grel ↔ pacman CLI Compatibility Audit
 
 > **Date:** 2026-05-09  

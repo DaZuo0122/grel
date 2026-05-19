@@ -1,3 +1,5 @@
+> **Note:** This is a strategic analysis document from 2026-05-09. It remains broadly valid for long-term planning but does not reflect recent fixes. For current implementation status, see [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md).
+
 # grel Production Gap Analysis
 
 > **Date:** 2026-05-09  

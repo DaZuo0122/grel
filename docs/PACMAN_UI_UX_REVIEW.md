@@ -1,3 +1,5 @@
+> **Note:** This is a historical review from 2026-05-16. Many issues identified here have since been addressed. For current behavior, see [COMMANDS.md](COMMANDS.md) and [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md).
+
 # Current CLI pacman Command Style & UI/UX Review
 Date: 2026-05-16
 Branch: `codex-test-automation-just`

@@ -1,3 +1,5 @@
+> **Note:** This is a historical regression review from a specific development branch (`codex-test-automation-just`, 2026-05-16). For current status, see [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md).
+
 # CLI Regression Review Report
 Date: 2026-05-16
 Baseline Report: `/testresult.md` (2026-05-14)

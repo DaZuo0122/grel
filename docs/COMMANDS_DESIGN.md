@@ -1,3 +1,5 @@
+> **Note:** This is a historical design document. For the current, accurate command reference, see [COMMANDS.md](COMMANDS.md).
+
 ## 📐 Command Syntax
 
 ```

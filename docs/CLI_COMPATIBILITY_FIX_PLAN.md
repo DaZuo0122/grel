@@ -1,3 +1,5 @@
+> **Note:** This is a historical fix plan from 2026-05-09. Many phases described here have been completed. For current status, see [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md).
+
 # CLI Compatibility Fix Plan
 
 > **Date:** 2026-05-09  

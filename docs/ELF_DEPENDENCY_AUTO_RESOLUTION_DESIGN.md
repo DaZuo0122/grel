@@ -1,3 +1,5 @@
+> **Note:** This is a historical design document. The feature described here has been largely implemented in `grel-elf`. For current behavior, see [ARCHITECTURE.md](ARCHITECTURE.md) and [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md).
+
 # ELF System Dependency Auto-Resolution Design
 
 > **Date:** 2026-05-09  

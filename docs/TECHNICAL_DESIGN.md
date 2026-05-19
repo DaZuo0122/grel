@@ -1,3 +1,5 @@
+> **Note:** This is a historical design document. Some details may be outdated. For the current architecture overview, see [ARCHITECTURE.md](ARCHITECTURE.md).
+
 # 📘 `grel-rs` Technical Design Document
 **Binary:** `grel` | **Repository:** `grel-rs`  
 **Target Platforms:** Linux, Windows (macOS optional)  
