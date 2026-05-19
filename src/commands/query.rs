@@ -131,13 +131,17 @@ pub async fn cmd_list_files(ctx: &CommandContext<'_>, pkg_filter: Option<&str>) 
 
     for pkg in &targets {
         let install_path = std::path::Path::new(&pkg.install_path);
-        let files = if let Some(id) = pkg.id {
+        let db_files = if let Some(id) = pkg.id {
             db.get_package_files(id).await.unwrap_or_default()
         } else {
             Vec::new()
         };
 
-        if files.is_empty() && !install_path.exists() {
+        // Fallback to filesystem walk when the DB index is empty
+        // (e.g. package was installed before the file index existed)
+        let use_filesystem = db_files.is_empty() && install_path.exists();
+
+        if db_files.is_empty() && !install_path.exists() {
             if !quiet {
                 eprintln!("  {}: install path not found", pkg.package_ref());
             }
@@ -145,13 +149,25 @@ pub async fn cmd_list_files(ctx: &CommandContext<'_>, pkg_filter: Option<&str>) 
         }
 
         if quiet {
-            for file in &files {
-                println!("{}", file.file_path);
+            if use_filesystem {
+                for entry in walkdir_for_owns(install_path) {
+                    println!("{}", entry.display());
+                }
+            } else {
+                for file in &db_files {
+                    println!("{}", file.file_path);
+                }
             }
         } else {
             println!("{} {}", pkg.package_ref().bold(), install_path.display());
-            for file in &files {
-                println!("  {}", file.file_path);
+            if use_filesystem {
+                for entry in walkdir_for_owns(install_path) {
+                    println!("  {}", entry.display());
+                }
+            } else {
+                for file in &db_files {
+                    println!("  {}", file.file_path);
+                }
             }
         }
     }
