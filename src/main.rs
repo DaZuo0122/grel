@@ -36,6 +36,12 @@ async fn main() -> Result<()> {
     if cli.no_verify_signatures {
         config.security.verify_signatures = false;
     }
+    if cli.enable_hooks {
+        config.security.enable_hooks = true;
+    }
+    if cli.no_enable_hooks {
+        config.security.enable_hooks = false;
+    }
     if let Some(ref registry_url) = cli.registry {
         config.registry.url = registry_url.clone();
     }

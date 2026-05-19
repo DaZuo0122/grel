@@ -463,7 +463,7 @@ async fn install_single_package(
         if let Err(e) = save_manifest_to_dir(manifest, &install_dir) {
             tracing::warn!("Failed to save manifest: {e}");
         }
-        if !download_only {
+        if !download_only && config.security.enable_hooks {
             if let Some(ref hook) = manifest.hooks.post_install {
                 run_hook(hook, &install_dir, "post_install");
             }
@@ -1004,7 +1004,7 @@ pub async fn cmd_sync(ctx: &CommandContext<'_>, packages: &[String]) -> Result<(
             if let Err(e) = save_manifest_to_dir(manifest, &install_dir) {
                 tracing::warn!("Failed to save manifest: {e}");
             }
-            if !ctx.cli.download_only {
+            if !ctx.cli.download_only && ctx.config.security.enable_hooks {
                 if let Some(ref hook) = manifest.hooks.post_install {
                     run_hook(hook, &install_dir, "post_install");
                 }

@@ -330,6 +330,22 @@ pub struct Cli {
     #[arg(long, action = clap::ArgAction::SetTrue)]
     pub no_verify_signatures: bool,
 
+    /// --enable-hooks: allow execution of post_install / pre_remove hooks
+    #[arg(
+        long,
+        action = clap::ArgAction::SetTrue,
+        conflicts_with = "no_enable_hooks"
+    )]
+    pub enable_hooks: bool,
+
+    /// --no-enable-hooks: disable execution of post_install / pre_remove hooks
+    #[arg(
+        long,
+        action = clap::ArgAction::SetTrue,
+        conflicts_with = "enable_hooks"
+    )]
+    pub no_enable_hooks: bool,
+
     /// --registry <url>
     #[arg(long, value_name = "URL")]
     pub registry: Option<String>,

@@ -241,47 +241,49 @@ pub async fn remove_package_files(
 ) -> Result<()> {
     let install_path = std::path::Path::new(&pkg.install_path);
 
-    // Run pre_remove hook if present
-    let manifest_path = if install_path.is_dir() {
-        install_path.join(".grel.toml")
-    } else if let Some(parent) = install_path.parent() {
-        parent.join(".grel.toml")
-    } else {
-        std::path::PathBuf::new()
-    };
+    // Run pre_remove hook if present and enabled
+    if config.security.enable_hooks {
+        let manifest_path = if install_path.is_dir() {
+            install_path.join(".grel.toml")
+        } else if let Some(parent) = install_path.parent() {
+            parent.join(".grel.toml")
+        } else {
+            std::path::PathBuf::new()
+        };
 
-    if manifest_path.exists() {
-        if let Ok(content) = std::fs::read_to_string(&manifest_path) {
-            if let Ok(manifest) = grel_core::Manifest::load_from_str(&content) {
-                if let Some(ref hook) = manifest.hooks.pre_remove {
-                    println!("  Running pre_remove hook...");
-                    let hook_dir = if install_path.is_dir() {
-                        install_path.to_path_buf()
-                    } else if let Some(parent) = install_path.parent() {
-                        parent.to_path_buf()
-                    } else {
-                        std::path::PathBuf::from(".")
-                    };
-                    let status = std::process::Command::new("sh")
-                        .arg("-c")
-                        .arg(hook)
-                        .current_dir(&hook_dir)
-                        .status();
-                    match status {
-                        Ok(s) if s.success() => {
-                            println!("  {}", "pre_remove hook completed".green());
-                        }
-                        Ok(s) => {
-                            eprintln!(
-                                "  {}",
-                                format!("pre_remove hook exited with status {s}").yellow()
-                            );
-                        }
-                        Err(e) => {
-                            eprintln!(
-                                "  {}",
-                                format!("Failed to run pre_remove hook: {e}").yellow()
-                            );
+        if manifest_path.exists() {
+            if let Ok(content) = std::fs::read_to_string(&manifest_path) {
+                if let Ok(manifest) = grel_core::Manifest::load_from_str(&content) {
+                    if let Some(ref hook) = manifest.hooks.pre_remove {
+                        println!("  Running pre_remove hook...");
+                        let hook_dir = if install_path.is_dir() {
+                            install_path.to_path_buf()
+                        } else if let Some(parent) = install_path.parent() {
+                            parent.to_path_buf()
+                        } else {
+                            std::path::PathBuf::from(".")
+                        };
+                        let status = std::process::Command::new("sh")
+                            .arg("-c")
+                            .arg(hook)
+                            .current_dir(&hook_dir)
+                            .status();
+                        match status {
+                            Ok(s) if s.success() => {
+                                println!("  {}", "pre_remove hook completed".green());
+                            }
+                            Ok(s) => {
+                                eprintln!(
+                                    "  {}",
+                                    format!("pre_remove hook exited with status {s}").yellow()
+                                );
+                            }
+                            Err(e) => {
+                                eprintln!(
+                                    "  {}",
+                                    format!("Failed to run pre_remove hook: {e}").yellow()
+                                );
+                            }
                         }
                     }
                 }
@@ -406,7 +408,7 @@ mod tests {
 
     #[tokio::test]
     #[cfg(unix)]
-    async fn remove_package_files_runs_pre_remove_hook() {
+    async fn remove_package_files_runs_pre_remove_hook_when_enabled() {
         let tmp = make_temp_dir("pre-remove-hook");
         let install_dir = tmp.join("install");
         std::fs::create_dir_all(&install_dir).unwrap();
@@ -437,10 +439,53 @@ mod tests {
         pkg.is_managed = true;
         pkg.status = PackageStatus::Active;
 
-        let config = grel_config::Config::default();
+        let mut config = grel_config::Config::default();
+        config.security.enable_hooks = true;
         remove_package_files(&config, &pkg, false).await.unwrap();
 
         assert!(hook_marker.exists(), "pre_remove hook should have created marker");
+
+        cleanup(&tmp);
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn remove_package_files_skips_pre_remove_hook_when_disabled() {
+        let tmp = make_temp_dir("pre-remove-hook-disabled");
+        let install_dir = tmp.join("install");
+        std::fs::create_dir_all(&install_dir).unwrap();
+
+        let hook_marker = tmp.join("hook_ran");
+
+        // Write a manifest with a pre_remove hook
+        let manifest = grel_core::Manifest {
+            name: "test".into(),
+            description: "".into(),
+            license: "".into(),
+            source: Default::default(),
+            assets: Default::default(),
+            checksum_filename: Default::default(),
+            signature_filename: Default::default(),
+            signature_kind: Default::default(),
+            dependencies: Default::default(),
+            hooks: grel_core::HookSpec {
+                pre_remove: Some(format!("touch {}", hook_marker.display())),
+                post_install: Default::default(),
+            },
+        };
+        let manifest_path = install_dir.join(".grel.toml");
+        std::fs::write(&manifest_path, manifest.to_toml().unwrap()).unwrap();
+
+        let mut pkg = InstalledPackage::new("github".into(), "owner".into(), "repo".into());
+        pkg.install_path = install_dir.to_string_lossy().to_string();
+        pkg.is_managed = true;
+        pkg.status = PackageStatus::Active;
+
+        let mut config = grel_config::Config::default();
+        config.security.enable_hooks = false; // disabled by default
+        remove_package_files(&config, &pkg, false).await.unwrap();
+
+        assert!(!hook_marker.exists(), "pre_remove hook should NOT run when disabled");
 
         cleanup(&tmp);
     }

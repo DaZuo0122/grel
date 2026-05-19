@@ -302,17 +302,27 @@ pub struct SecurityConfig {
     /// a valid detached signature or checksum file.
     #[serde(default = "default_verify_signatures")]
     pub verify_signatures: bool,
+
+    /// Enable execution of manifest hooks (post_install / pre_remove).
+    /// Disabled by default for security.
+    #[serde(default = "default_enable_hooks")]
+    pub enable_hooks: bool,
 }
 
 impl Default for SecurityConfig {
     fn default() -> Self {
         Self {
             verify_signatures: default_verify_signatures(),
+            enable_hooks: default_enable_hooks(),
         }
     }
 }
 
 fn default_verify_signatures() -> bool {
+    false
+}
+
+fn default_enable_hooks() -> bool {
     false
 }
 
