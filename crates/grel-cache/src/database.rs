@@ -158,6 +158,39 @@ impl Database {
         .execute(pool)
         .await?;
 
+        // Create package files index table
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS package_files (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                package_id INTEGER NOT NULL,
+                file_path TEXT NOT NULL,
+                file_type TEXT NOT NULL DEFAULT 'data',
+                FOREIGN KEY (package_id) REFERENCES installed(id) ON DELETE CASCADE
+            )
+            "#,
+        )
+        .execute(pool)
+        .await?;
+
+        sqlx::query(
+            r#"
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_pkg_file_unique
+            ON package_files(package_id, file_path)
+            "#,
+        )
+        .execute(pool)
+        .await?;
+
+        sqlx::query(
+            r#"
+            CREATE INDEX IF NOT EXISTS idx_pkg_file_path
+            ON package_files(file_path)
+            "#,
+        )
+        .execute(pool)
+        .await?;
+
         Ok(())
     }
 
@@ -350,7 +383,7 @@ impl Database {
         .fetch_optional(&self.pool)
         .await?;
 
-        Ok(row.map(Self::row_to_package))
+        Ok(row.map(|r| Self::row_to_package(&r)))
     }
 
     /// List all packages
@@ -366,7 +399,7 @@ impl Database {
         .fetch_all(&self.pool)
         .await?;
 
-        Ok(rows.into_iter().map(Self::row_to_package).collect())
+        Ok(rows.into_iter().map(|r| Self::row_to_package(&r)).collect())
     }
 
     /// Mark a package as orphaned
@@ -391,8 +424,14 @@ impl Database {
         Ok(())
     }
 
-    /// Remove a package
+    /// Remove a package and its file index entries
     pub async fn remove_package(&self, id: i64) -> Result<(), DatabaseError> {
+        // Delete file index entries first (SQLite FK cascade may be off)
+        sqlx::query("DELETE FROM package_files WHERE package_id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+
         sqlx::query("DELETE FROM installed WHERE id = ?")
             .bind(id)
             .execute(&self.pool)
@@ -453,7 +492,7 @@ impl Database {
     }
 
     /// Helper to convert a database row to InstalledPackage
-    fn row_to_package(row: sqlx::sqlite::SqliteRow) -> InstalledPackage {
+    fn row_to_package(row: &sqlx::sqlite::SqliteRow) -> InstalledPackage {
         InstalledPackage {
             id: Some(row.get("id")),
             forge: row.get("forge"),
@@ -583,7 +622,7 @@ impl Database {
         .fetch_all(&self.pool)
         .await?;
 
-        Ok(rows.into_iter().map(Self::row_to_package).collect())
+        Ok(rows.into_iter().map(|r| Self::row_to_package(&r)).collect())
     }
 
     /// Update the explicit flag for a package
@@ -624,7 +663,7 @@ impl Database {
         .fetch_all(&self.pool)
         .await?;
 
-        Ok(rows.into_iter().map(Self::row_to_package).collect())
+        Ok(rows.into_iter().map(|r| Self::row_to_package(&r)).collect())
     }
 
     /// Look up a cached library → package mapping for the given distro.
@@ -669,6 +708,184 @@ impl Database {
         Ok(())
     }
 
+    /// Add file records for a package (replaces existing)
+    pub async fn set_package_files(
+        &self,
+        package_id: i64,
+        files: &[crate::models::PackageFile],
+    ) -> Result<(), DatabaseError> {
+        // Delete existing files for this package
+        sqlx::query("DELETE FROM package_files WHERE package_id = ?")
+            .bind(package_id)
+            .execute(&self.pool)
+            .await?;
+
+        // Insert new files
+        for file in files {
+            sqlx::query(
+                r#"
+                INSERT INTO package_files (package_id, file_path, file_type)
+                VALUES (?, ?, ?)
+                "#,
+            )
+            .bind(package_id)
+            .bind(&file.file_path)
+            .bind(&file.file_type)
+            .execute(&self.pool)
+            .await?;
+        }
+
+        Ok(())
+    }
+
+    /// Get all file records for a package
+    pub async fn get_package_files(
+        &self,
+        package_id: i64,
+    ) -> Result<Vec<crate::models::PackageFile>, DatabaseError> {
+        let rows = sqlx::query(
+            r#"
+            SELECT id, package_id, file_path, file_type
+            FROM package_files
+            WHERE package_id = ?
+            ORDER BY file_path
+            "#,
+        )
+        .bind(package_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(|r| crate::models::PackageFile {
+                id: Some(r.get("id")),
+                package_id: r.get("package_id"),
+                file_path: r.get("file_path"),
+                file_type: r.get("file_type"),
+            })
+            .collect())
+    }
+
+    /// Search file paths by pattern (case-insensitive LIKE)
+    pub async fn search_package_files(
+        &self,
+        pattern: &str,
+    ) -> Result<Vec<(crate::models::InstalledPackage, crate::models::PackageFile)>, DatabaseError>
+    {
+        let like_pattern = format!("%{pattern}%");
+        let rows = sqlx::query(
+            r#"
+            SELECT i.id, i.forge, i.owner, i.repo, i.version, i.asset_filename, i.checksum,
+                   i.install_path, i.installed_binaries, i.is_managed, i.status, i.orphaned_at, i.last_checked, i.installed_at, i.manifest_source, i.is_explicit,
+                   f.id as file_id, f.package_id, f.file_path, f.file_type
+            FROM package_files f
+            JOIN installed i ON f.package_id = i.id
+            WHERE LOWER(f.file_path) LIKE LOWER(?)
+            ORDER BY i.forge, i.owner, i.repo, f.file_path
+            "#,
+        )
+        .bind(&like_pattern)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(|r| {
+                let pkg = Self::row_to_package(&r);
+                let file = crate::models::PackageFile {
+                    id: Some(r.get("file_id")),
+                    package_id: r.get("package_id"),
+                    file_path: r.get("file_path"),
+                    file_type: r.get("file_type"),
+                };
+                (pkg, file)
+            })
+            .collect())
+    }
+
+    /// Find packages that own a file by exact path match
+    pub async fn find_package_by_file_path(
+        &self,
+        path: &str,
+    ) -> Result<Vec<crate::models::InstalledPackage>, DatabaseError> {
+        let rows = sqlx::query(
+            r#"
+            SELECT i.id, i.forge, i.owner, i.repo, i.version, i.asset_filename, i.checksum,
+                   i.install_path, i.installed_binaries, i.is_managed, i.status, i.orphaned_at, i.last_checked, i.installed_at, i.manifest_source, i.is_explicit
+            FROM installed i
+            JOIN package_files f ON i.id = f.package_id
+            WHERE f.file_path = ?
+            "#,
+        )
+        .bind(path)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows.into_iter().map(|r| Self::row_to_package(&r)).collect())
+    }
+
+    /// Find packages that own a file by filename (basename) match
+    pub async fn find_package_by_filename(
+        &self,
+        filename: &str,
+    ) -> Result<Vec<crate::models::InstalledPackage>, DatabaseError> {
+        let rows = sqlx::query(
+            r#"
+            SELECT DISTINCT i.id, i.forge, i.owner, i.repo, i.version, i.asset_filename, i.checksum,
+                   i.install_path, i.installed_binaries, i.is_managed, i.status, i.orphaned_at, i.last_checked, i.installed_at, i.manifest_source, i.is_explicit
+            FROM installed i
+            JOIN package_files f ON i.id = f.package_id
+            WHERE f.file_path LIKE '%' || ?
+            "#,
+        )
+        .bind(filename)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows.into_iter().map(|r| Self::row_to_package(&r)).collect())
+    }
+
+    /// Check if any file paths would conflict with existing packages
+    pub async fn find_conflicting_files(
+        &self,
+        file_paths: &[String],
+    ) -> Result<Vec<(crate::models::InstalledPackage, String)>, DatabaseError> {
+        if file_paths.is_empty() {
+            return Ok(vec![]);
+        }
+
+        // Build a parameterized query with multiple OR conditions
+        let mut query_str = String::from(
+            r#"
+            SELECT i.id, i.forge, i.owner, i.repo, i.version, i.asset_filename, i.checksum,
+                   i.install_path, i.installed_binaries, i.is_managed, i.status, i.orphaned_at, i.last_checked, i.installed_at, i.manifest_source, i.is_explicit,
+                   f.file_path as conflict_path
+            FROM installed i
+            JOIN package_files f ON i.id = f.package_id
+            WHERE f.file_path IN (
+            "#,
+        );
+        let placeholders: Vec<String> = (0..file_paths.len()).map(|i| format!("?{}", i + 1)).collect();
+        query_str.push_str(&placeholders.join(", "));
+        query_str.push(')');
+
+        let mut query = sqlx::query(&query_str);
+        for path in file_paths {
+            query = query.bind(path);
+        }
+
+        let rows = query.fetch_all(&self.pool).await?;
+
+        Ok(rows
+            .into_iter()
+            .map(|r| {
+                let pkg = Self::row_to_package(&r);
+                let conflict_path: String = r.get("conflict_path");
+                (pkg, conflict_path)
+            })
+            .collect())
+    }
+
     /// Remove ETag cache entries older than 30 days.
     pub async fn clean_etag_cache(&self) -> Result<u64, DatabaseError> {
         let result = sqlx::query(
@@ -703,6 +920,205 @@ impl Database {
     /// Close the database connection
     pub async fn close(self) {
         self.pool.close().await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::{InstalledPackage, PackageFile, PackageStatus};
+
+    async fn open_test_db() -> Database {
+        let tmp = std::env::temp_dir().join(format!("grel-test-db-{}", std::process::id()));
+        let _ = std::fs::remove_file(&tmp);
+        Database::init(&tmp).await.expect("open test db")
+    }
+
+    #[tokio::test]
+    async fn package_files_round_trip() {
+        let db = open_test_db().await;
+
+        let mut pkg = InstalledPackage::new("github".into(), "owner".into(), "repo".into());
+        pkg.version = "1.0.0".into();
+        pkg.asset_filename = "test.tar.gz".into();
+        pkg.install_path = "/tmp/test".into();
+        pkg.status = PackageStatus::Active;
+        db.upsert_package(&pkg).await.unwrap();
+
+        let fetched = db.get_package("github", "owner", "repo").await.unwrap().unwrap();
+        let pkg_id = fetched.id.unwrap();
+
+        let files = vec![
+            PackageFile::new(pkg_id, "/tmp/test/bin/rg".into(), "binary".into()),
+            PackageFile::new(pkg_id, "/tmp/test/README.md".into(), "doc".into()),
+        ];
+        db.set_package_files(pkg_id, &files).await.unwrap();
+
+        let stored = db.get_package_files(pkg_id).await.unwrap();
+        assert_eq!(stored.len(), 2);
+        assert!(stored.iter().any(|f| f.file_path == "/tmp/test/bin/rg" && f.file_type == "binary"));
+        assert!(stored.iter().any(|f| f.file_path == "/tmp/test/README.md" && f.file_type == "doc"));
+
+        db.close().await;
+    }
+
+    #[tokio::test]
+    async fn package_files_replaced_on_update() {
+        let db = open_test_db().await;
+
+        let mut pkg = InstalledPackage::new("github".into(), "a".into(), "b".into());
+        pkg.version = "1.0.0".into();
+        pkg.asset_filename = "test.zip".into();
+        pkg.install_path = "/tmp/ab".into();
+        pkg.status = PackageStatus::Active;
+        db.upsert_package(&pkg).await.unwrap();
+
+        let fetched = db.get_package("github", "a", "b").await.unwrap().unwrap();
+        let pkg_id = fetched.id.unwrap();
+
+        db.set_package_files(pkg_id, &[PackageFile::new(pkg_id, "/tmp/ab/old".into(), "data".into())])
+            .await
+            .unwrap();
+        db.set_package_files(pkg_id, &[PackageFile::new(pkg_id, "/tmp/ab/new".into(), "data".into())])
+            .await
+            .unwrap();
+
+        let stored = db.get_package_files(pkg_id).await.unwrap();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].file_path, "/tmp/ab/new");
+
+        db.close().await;
+    }
+
+    #[tokio::test]
+    async fn search_package_files_finds_matches() {
+        let db = open_test_db().await;
+
+        let mut pkg = InstalledPackage::new("github".into(), "owner".into(), "repo".into());
+        pkg.version = "1.0.0".into();
+        pkg.asset_filename = "test.tar.gz".into();
+        pkg.install_path = "/tmp/test".into();
+        pkg.status = PackageStatus::Active;
+        db.upsert_package(&pkg).await.unwrap();
+
+        let fetched = db.get_package("github", "owner", "repo").await.unwrap().unwrap();
+        let pkg_id = fetched.id.unwrap();
+
+        db.set_package_files(
+            pkg_id,
+            &[PackageFile::new(pkg_id, "/tmp/test/bin/rg".into(), "binary".into())],
+        )
+        .await
+        .unwrap();
+
+        let results = db.search_package_files("rg").await.unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].1.file_path, "/tmp/test/bin/rg");
+
+        let empty = db.search_package_files("nonexistent").await.unwrap();
+        assert!(empty.is_empty());
+
+        db.close().await;
+    }
+
+    #[tokio::test]
+    async fn find_package_by_file_path_exact_match() {
+        let db = open_test_db().await;
+
+        let mut pkg = InstalledPackage::new("github".into(), "o".into(), "r".into());
+        pkg.version = "1.0.0".into();
+        pkg.asset_filename = "test.zip".into();
+        pkg.install_path = "/tmp/or".into();
+        pkg.status = PackageStatus::Active;
+        db.upsert_package(&pkg).await.unwrap();
+
+        let fetched = db.get_package("github", "o", "r").await.unwrap().unwrap();
+        let pkg_id = fetched.id.unwrap();
+
+        db.set_package_files(
+            pkg_id,
+            &[PackageFile::new(pkg_id, "/tmp/or/file.txt".into(), "data".into())],
+        )
+        .await
+        .unwrap();
+
+        let found = db.find_package_by_file_path("/tmp/or/file.txt").await.unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].package_ref(), "github/o/r");
+
+        db.close().await;
+    }
+
+    #[tokio::test]
+    async fn find_conflicting_files_detects_other_packages() {
+        let db = open_test_db().await;
+
+        let mut pkg1 = InstalledPackage::new("github".into(), "a".into(), "b".into());
+        pkg1.version = "1.0.0".into();
+        pkg1.asset_filename = "a.zip".into();
+        pkg1.install_path = "/tmp/ab".into();
+        pkg1.status = PackageStatus::Active;
+        db.upsert_package(&pkg1).await.unwrap();
+
+        let mut pkg2 = InstalledPackage::new("github".into(), "c".into(), "d".into());
+        pkg2.version = "1.0.0".into();
+        pkg2.asset_filename = "c.zip".into();
+        pkg2.install_path = "/tmp/cd".into();
+        pkg2.status = PackageStatus::Active;
+        db.upsert_package(&pkg2).await.unwrap();
+
+        let id1 = db.get_package("github", "a", "b").await.unwrap().unwrap().id.unwrap();
+        let id2 = db.get_package("github", "c", "d").await.unwrap().unwrap().id.unwrap();
+
+        db.set_package_files(
+            id1,
+            &[PackageFile::new(id1, "/shared/lib.so".into(), "data".into())],
+        )
+        .await
+        .unwrap();
+        db.set_package_files(
+            id2,
+            &[PackageFile::new(id2, "/shared/lib.so".into(), "data".into())],
+        )
+        .await
+        .unwrap();
+
+        let conflicts = db
+            .find_conflicting_files(&["/shared/lib.so".into()])
+            .await
+            .unwrap();
+        assert_eq!(conflicts.len(), 2);
+
+        db.close().await;
+    }
+
+    #[tokio::test]
+    async fn remove_package_deletes_file_records() {
+        let db = open_test_db().await;
+
+        let mut pkg = InstalledPackage::new("github".into(), "x".into(), "y".into());
+        pkg.version = "1.0.0".into();
+        pkg.asset_filename = "x.zip".into();
+        pkg.install_path = "/tmp/xy".into();
+        pkg.status = PackageStatus::Active;
+        db.upsert_package(&pkg).await.unwrap();
+
+        let fetched = db.get_package("github", "x", "y").await.unwrap().unwrap();
+        let pkg_id = fetched.id.unwrap();
+
+        db.set_package_files(
+            pkg_id,
+            &[PackageFile::new(pkg_id, "/tmp/xy/file".into(), "data".into())],
+        )
+        .await
+        .unwrap();
+
+        db.remove_package(pkg_id).await.unwrap();
+
+        let stored = db.get_package_files(pkg_id).await.unwrap();
+        assert!(stored.is_empty());
+
+        db.close().await;
     }
 }
 

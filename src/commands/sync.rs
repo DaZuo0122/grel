@@ -503,6 +503,43 @@ async fn install_single_package(
         .await?
         .ok_or_else(|| anyhow::anyhow!("Package not found after upsert"))?;
 
+    // Record extracted files in the package_files index
+    if is_managed {
+        if let Some(pkg_id) = updated_pkg.id {
+            let files = collect_package_files(&install_dir, &config.paths.bin_dir, &archive_path);
+            let file_paths: Vec<String> = files.iter().map(|(p, _)| p.clone()).collect();
+
+            // Conflict detection: check if any files already belong to other packages
+            if let Ok(conflicts) = db.find_conflicting_files(&file_paths).await {
+                let other_conflicts: Vec<_> = conflicts
+                    .into_iter()
+                    .filter(|(pkg, _)| pkg.id != Some(pkg_id))
+                    .collect();
+                if !other_conflicts.is_empty() {
+                    eprintln!(
+                        "  {}",
+                        format!("Warning: {} file(s) conflict with other packages:", other_conflicts.len()).yellow()
+                    );
+                    let mut shown = std::collections::HashSet::new();
+                    for (conflict_pkg, conflict_path) in &other_conflicts {
+                        let key = format!("{} -> {}", conflict_pkg.package_ref(), conflict_path);
+                        if shown.insert(key.clone()) {
+                            eprintln!("    {} owns '{}'", conflict_pkg.package_ref(), conflict_path);
+                        }
+                    }
+                }
+            }
+
+            let file_models: Vec<grel_cache::models::PackageFile> = files
+                .into_iter()
+                .map(|(path, ftype)| grel_cache::models::PackageFile::new(pkg_id, path, ftype))
+                .collect();
+            if let Err(e) = db.set_package_files(pkg_id, &file_models).await {
+                tracing::warn!("Failed to record package files: {e}");
+            }
+        }
+    }
+
     if download_only {
         println!(
             "  {}",
@@ -516,6 +553,108 @@ async fn install_single_package(
     }
 
     Ok(updated_pkg.id.unwrap_or(-1))
+}
+
+/// Walk the install directory and collect all files with type hints.
+fn collect_package_files(
+    install_dir: &std::path::Path,
+    bin_dir: &std::path::Path,
+    archive_path: &std::path::Path,
+) -> Vec<(String, String)> {
+    let mut files = Vec::new();
+
+    // Collect all files under install_dir
+    fn walk(dir: &std::path::Path, files: &mut Vec<std::path::PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else { return };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, files);
+            } else {
+                files.push(path);
+            }
+        }
+    }
+
+    let mut found = Vec::new();
+    walk(install_dir, &mut found);
+
+    for path in found {
+        let Some(abs_str) = path.to_str() else { continue };
+        let ftype = classify_file_type(&path, bin_dir, archive_path);
+        files.push((abs_str.to_string(), ftype));
+    }
+
+    files
+}
+
+/// Classify a file into a type hint.
+fn classify_file_type(
+    path: &std::path::Path,
+    bin_dir: &std::path::Path,
+    archive_path: &std::path::Path,
+) -> String {
+    if path == archive_path {
+        return "archive".into();
+    }
+
+    // Check if this file is a linked binary (resides in bin_dir)
+    if path.starts_with(bin_dir) {
+        return "binary".into();
+    }
+
+    let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+        return "data".into();
+    };
+    let lower = name.to_lowercase();
+
+    // Config files
+    if lower.ends_with(".toml")
+        || lower.ends_with(".conf")
+        || lower.ends_with(".yaml")
+        || lower.ends_with(".yml")
+        || lower.ends_with(".json")
+        || lower.ends_with(".ini")
+        || lower.ends_with(".cfg")
+    {
+        return "config".into();
+    }
+
+    // Documentation
+    const DOC_NAMES: &[&str] = &[
+        "readme", "license", "unlicense", "copying", "changelog", "changes", "notice",
+        "authors", "contributors", "credits",
+    ];
+    let stem = std::path::Path::new(&lower)
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default();
+    if DOC_NAMES.contains(&stem.as_str()) || lower.ends_with(".md") || lower.ends_with(".txt") {
+        return "doc".into();
+    }
+
+    // Executable binaries (inside extracted tree)
+    if lower.ends_with(".exe")
+        || lower.ends_with(".bat")
+        || lower.ends_with(".cmd")
+        || lower.ends_with(".ps1")
+        || lower.ends_with(".com")
+        || lower.ends_with(".bin")
+    {
+        return "binary".into();
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(meta) = std::fs::metadata(path) {
+            if meta.permissions().mode() & 0o111 != 0 {
+                return "binary".into();
+            }
+        }
+    }
+
+    "data".into()
 }
 
 /// Present the resolved asset selection to the user, show alternatives,

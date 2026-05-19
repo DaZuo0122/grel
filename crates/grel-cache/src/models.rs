@@ -230,6 +230,28 @@ impl DependencyType {
     }
 }
 
+/// A file belonging to an installed package
+#[derive(Debug, Clone)]
+pub struct PackageFile {
+    pub id: Option<i64>,
+    pub package_id: i64,
+    /// Absolute path to the file on disk
+    pub file_path: String,
+    /// File type hint: 'binary', 'data', 'doc', 'config', 'archive', etc.
+    pub file_type: String,
+}
+
+impl PackageFile {
+    pub fn new(package_id: i64, file_path: String, file_type: String) -> Self {
+        Self {
+            id: None,
+            package_id,
+            file_path,
+            file_type,
+        }
+    }
+}
+
 /// ETag cache entry
 #[derive(Debug, Clone)]
 pub struct ETagEntry {

@@ -131,7 +131,13 @@ pub async fn cmd_list_files(ctx: &CommandContext<'_>, pkg_filter: Option<&str>) 
 
     for pkg in &targets {
         let install_path = std::path::Path::new(&pkg.install_path);
-        if !install_path.exists() {
+        let files = if let Some(id) = pkg.id {
+            db.get_package_files(id).await.unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+
+        if files.is_empty() && !install_path.exists() {
             if !quiet {
                 eprintln!("  {}: install path not found", pkg.package_ref());
             }
@@ -139,38 +145,19 @@ pub async fn cmd_list_files(ctx: &CommandContext<'_>, pkg_filter: Option<&str>) 
         }
 
         if quiet {
-            for entry in walkdir(install_path)? {
-                println!("{}", entry.display());
+            for file in &files {
+                println!("{}", file.file_path);
             }
         } else {
             println!("{} {}", pkg.package_ref().bold(), install_path.display());
-            for entry in walkdir(install_path)? {
-                println!("  {}", entry.display());
+            for file in &files {
+                println!("  {}", file.file_path);
             }
         }
     }
 
     db.close().await;
     Ok(())
-}
-
-/// Walk a directory recursively, returning all file paths
-fn walkdir(path: &std::path::Path) -> Result<Vec<std::path::PathBuf>> {
-    let mut result = Vec::new();
-    if path.is_file() {
-        result.push(path.to_path_buf());
-        return Ok(result);
-    }
-    for entry in std::fs::read_dir(path)? {
-        let entry = entry?;
-        let path = entry.path();
-        if path.is_dir() {
-            result.extend(walkdir(&path)?);
-        } else {
-            result.push(path);
-        }
-    }
-    Ok(result)
 }
 
 /// List orphaned packages (repo-unreachable status)
@@ -352,7 +339,6 @@ pub async fn cmd_info_remote(ctx: &CommandContext<'_>, pkg_ref_str: String) -> R
 /// Find which package owns a file
 pub async fn cmd_owns(ctx: &CommandContext<'_>, path: String) -> Result<()> {
     let db = ctx.db().await?;
-    let packages = db.list_packages().await?;
 
     let query = std::path::Path::new(&path);
     let query_name = query.file_name();
@@ -362,96 +348,108 @@ pub async fn cmd_owns(ctx: &CommandContext<'_>, path: String) -> Result<()> {
     eprintln!("[owns] query='{}' name={:?} canon={:?}", path, query_name, query_canon);
 
     let mut found = Vec::new();
-    for pkg in &packages {
-        let install_path = std::path::Path::new(&pkg.install_path);
 
-        #[cfg(debug_assertions)]
-        eprintln!(
-            "[owns] pkg={} install_path={} exists={} binaries={:?}",
-            pkg.package_ref(),
-            install_path.display(),
-            install_path.exists(),
-            pkg.binary_list(),
-        );
-
-        let mut matched = false;
-
-        // Candidate 1: linked binaries in bin_dir
-        for bin_name in pkg.binary_list() {
-            let bin_path = ctx.config.paths.bin_dir.join(&bin_name);
-            #[cfg(debug_assertions)]
-            eprintln!("[owns]   bin_check={}", bin_path.display());
-            if path_matches(&bin_path, query, query_canon.as_deref()) {
-                #[cfg(debug_assertions)]
-                eprintln!("[owns]   -> MATCHED via binary_list");
-                matched = true;
-                break;
+    // Candidate 1: exact path match via package_files index
+    if let Ok(pkgs) = db.find_package_by_file_path(&path).await {
+        for pkg in pkgs {
+            if !found.iter().any(|p: &grel_cache::models::InstalledPackage| p.id == pkg.id) {
+                found.push(pkg);
             }
         }
+    }
 
-        // Candidate 2: files inside the install directory (walk it)
-        if !matched && install_path.exists() {
-            let files = walkdir_for_owns(install_path);
-            #[cfg(debug_assertions)]
-            eprintln!("[owns]   walkdir found {} files", files.len());
-            for file in &files {
-                #[cfg(debug_assertions)]
-                eprintln!(
-                    "[owns]     file={} name={:?}",
-                    file.display(),
-                    file.file_name()
-                );
-            }
-            for file in files {
-                if path_matches(&file, query, query_canon.as_deref()) {
-                    #[cfg(debug_assertions)]
-                    eprintln!("[owns]   -> MATCHED via walkdir");
-                    matched = true;
-                    break;
+    // Candidate 2: canonicalized path match via package_files index
+    if let Some(ref canon) = query_canon {
+        let canon_str = canon.to_string_lossy().to_string();
+        if canon_str != path {
+            if let Ok(pkgs) = db.find_package_by_file_path(&canon_str).await {
+                for pkg in pkgs {
+                    if !found.iter().any(|p: &grel_cache::models::InstalledPackage| p.id == pkg.id) {
+                        found.push(pkg);
+                    }
                 }
             }
         }
+    }
 
-        // Candidate 3: install directory itself
-        if !matched && path_matches(install_path, query, query_canon.as_deref()) {
-            #[cfg(debug_assertions)]
-            eprintln!("[owns]   -> MATCHED via install_path");
-            matched = true;
-        }
-
-        // Candidate 4: archive file
-        if !matched {
-            let archive_path = if install_path.ends_with(&pkg.asset_filename) {
-                install_path.to_path_buf()
-            } else {
-                install_path.join(&pkg.asset_filename)
-            };
-            if path_matches(&archive_path, query, query_canon.as_deref()) {
-                #[cfg(debug_assertions)]
-                eprintln!("[owns]   -> MATCHED via archive");
-                matched = true;
+    // Candidate 3: filename match via package_files index
+    if let Some(q_name) = query_name {
+        let name_str = q_name.to_string_lossy().to_string();
+        if let Ok(pkgs) = db.find_package_by_filename(&name_str).await {
+            for pkg in pkgs {
+                if !found.iter().any(|p: &grel_cache::models::InstalledPackage| p.id == pkg.id) {
+                    found.push(pkg);
+                }
             }
         }
+    }
 
-        // Candidate 5: filename-only fallback (also matches stems, e.g. "rg" → "rg.exe")
-        if !matched && query_name.is_some() {
-            if let Some(q_name) = query_name {
-                if install_path.exists() {
-                    let files = walkdir_for_owns(install_path);
-                    for file in files {
-                        if filename_matches(file.file_name(), Some(q_name)) {
-                            #[cfg(debug_assertions)]
-                            eprintln!("[owns]   -> MATCHED via filename fallback");
-                            matched = true;
-                            break;
+    // Candidate 4: stem match (e.g. "rg" matches "rg.exe")
+    if let Some(q_name) = query_name {
+        let name_str = q_name.to_string_lossy().to_string();
+        let stem = std::path::Path::new(&name_str)
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_string());
+        if let Some(stem_str) = stem {
+            if stem_str != name_str {
+                if let Ok(pkgs) = db.find_package_by_filename(&stem_str).await {
+                    for pkg in pkgs {
+                        if !found.iter().any(|p: &grel_cache::models::InstalledPackage| p.id == pkg.id) {
+                            found.push(pkg);
                         }
                     }
                 }
             }
         }
+    }
 
-        if matched {
-            found.push(pkg);
+    // Fallback: filesystem walk for packages not yet indexed
+    if found.is_empty() {
+        let packages = db.list_packages().await?;
+        for pkg in &packages {
+            let install_path = std::path::Path::new(&pkg.install_path);
+            let mut matched = false;
+
+            // Linked binaries in bin_dir
+            for bin_name in pkg.binary_list() {
+                let bin_path = ctx.config.paths.bin_dir.join(&bin_name);
+                if path_matches(&bin_path, query, query_canon.as_deref()) {
+                    matched = true;
+                    break;
+                }
+            }
+
+            // Files inside install directory
+            if !matched && install_path.exists() {
+                let files = walkdir_for_owns(install_path);
+                for file in files {
+                    if path_matches(&file, query, query_canon.as_deref()) {
+                        matched = true;
+                        break;
+                    }
+                }
+            }
+
+            // Install directory itself
+            if !matched && path_matches(install_path, query, query_canon.as_deref()) {
+                matched = true;
+            }
+
+            // Archive file
+            if !matched {
+                let archive_path = if install_path.ends_with(&pkg.asset_filename) {
+                    install_path.to_path_buf()
+                } else {
+                    install_path.join(&pkg.asset_filename)
+                };
+                if path_matches(&archive_path, query, query_canon.as_deref()) {
+                    matched = true;
+                }
+            }
+
+            if matched {
+                found.push(pkg.clone());
+            }
         }
     }
 
