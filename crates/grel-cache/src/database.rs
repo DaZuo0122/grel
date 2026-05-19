@@ -1128,6 +1128,120 @@ mod tests {
 
         db.close().await;
     }
+
+    #[tokio::test]
+    async fn find_package_by_filename_matches_basename() {
+        let db = open_test_db().await;
+
+        let mut pkg = InstalledPackage::new("github".into(), "fn".into(), "test".into());
+        pkg.version = "1.0.0".into();
+        pkg.asset_filename = "fn.tar.gz".into();
+        pkg.install_path = "/tmp/fn".into();
+        pkg.status = PackageStatus::Active;
+        db.upsert_package(&pkg).await.unwrap();
+
+        let fetched = db.get_package("github", "fn", "test").await.unwrap().unwrap();
+        let pkg_id = fetched.id.unwrap();
+
+        db.set_package_files(
+            pkg_id,
+            &[PackageFile::new(pkg_id, "/tmp/fn/bin/mytool".into(), "binary".into())],
+        )
+        .await
+        .unwrap();
+
+        let found = db.find_package_by_filename("mytool").await.unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].repo, "test");
+
+        let empty = db.find_package_by_filename("nothere").await.unwrap();
+        assert!(empty.is_empty());
+
+        db.close().await;
+    }
+
+    #[tokio::test]
+    async fn clean_etag_cache_removes_stale_entries() {
+        let db = open_test_db().await;
+
+        // Insert a stale entry (last_modified > 30 days ago)
+        let stale_ts: i64 = chrono::Utc::now().timestamp() - 86400 * 31;
+        sqlx::query(
+            "INSERT OR REPLACE INTO etag_cache (url, etag, last_modified) VALUES (?, ?, ?)",
+        )
+        .bind("https://example.com/stale")
+        .bind("etag-stale")
+        .bind(stale_ts)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+
+        // Insert a fresh entry
+        db.store_etag("https://example.com/fresh", "etag-fresh")
+            .await
+            .unwrap();
+
+        let removed = db.clean_etag_cache().await.unwrap();
+        assert_eq!(removed, 1);
+
+        // Fresh entry must still be reachable
+        let still_there = db.get_etag("https://example.com/fresh").await.unwrap();
+        assert_eq!(still_there.as_deref(), Some("etag-fresh"));
+
+        db.close().await;
+    }
+
+    #[tokio::test]
+    async fn clean_dns_cache_removes_expired_entries() {
+        let db = open_test_db().await;
+
+        let now = chrono::Utc::now().timestamp();
+
+        // Insert an expired DNS entry
+        sqlx::query(
+            "INSERT OR REPLACE INTO dns_cache (hostname, ip_address, rtt_ms, expires_at) VALUES (?, ?, ?, ?)",
+        )
+        .bind("expired.example.com")
+        .bind("1.2.3.4")
+        .bind(10i64)
+        .bind(now - 1)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+
+        // Insert a valid DNS entry
+        sqlx::query(
+            "INSERT OR REPLACE INTO dns_cache (hostname, ip_address, rtt_ms, expires_at) VALUES (?, ?, ?, ?)",
+        )
+        .bind("valid.example.com")
+        .bind("5.6.7.8")
+        .bind(10i64)
+        .bind(now + 300)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+
+        let removed = db.clean_dns_cache().await.unwrap();
+        assert_eq!(removed, 1);
+
+        // Valid entry must remain
+        let row = sqlx::query("SELECT ip_address FROM dns_cache WHERE hostname = ?")
+            .bind("valid.example.com")
+            .fetch_optional(&db.pool)
+            .await
+            .unwrap();
+        assert!(row.is_some());
+
+        db.close().await;
+    }
+
+    #[tokio::test]
+    async fn check_integrity_returns_ok_on_fresh_db() {
+        let db = open_test_db().await;
+        let result = db.check_integrity().await.unwrap();
+        assert_eq!(result, "ok");
+        db.close().await;
+    }
 }
 
 /// Database errors
