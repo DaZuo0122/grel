@@ -135,8 +135,24 @@ async fn resolve_manifest(
     None
 }
 
+/// Check whether a package should be skipped because it is already up-to-date.
+async fn check_needed_skip(
+    db: &grel_cache::Database,
+    forge: &str,
+    owner: &str,
+    repo: &str,
+    target_version: &str,
+) -> Result<bool> {
+    if let Some(existing) = db.get_package(forge, owner, repo).await? {
+        if existing.version == target_version {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 /// Save manifest to the package install directory for later use (e.g., pre_remove hooks).
-fn save_manifest_to_dir(
+pub(crate) fn save_manifest_to_dir(
     manifest: &grel_core::Manifest,
     install_dir: &std::path::Path,
 ) -> Result<()> {
@@ -148,7 +164,7 @@ fn save_manifest_to_dir(
 }
 
 /// Run a hook script from the package install directory.
-fn run_hook(hook: &str, install_dir: &std::path::Path, label: &str) {
+pub(crate) fn run_hook(hook: &str, install_dir: &std::path::Path, label: &str) {
     println!("  Running {label} hook...");
     let status = std::process::Command::new("sh")
         .arg("-c")
@@ -166,6 +182,41 @@ fn run_hook(hook: &str, install_dir: &std::path::Path, label: &str) {
             format!("Failed to run {label} hook: {e}").yellow()
         ),
     }
+}
+
+/// Clean stale archives under a managed package directory.
+/// Returns (removed_count, failed_count).
+pub(crate) fn clean_package_dir(
+    pkg_dir: &std::path::Path,
+    expected_archive: &std::path::Path,
+) -> (usize, usize) {
+    let mut removed = 0;
+    let mut failed = 0;
+
+    let Ok(entries) = std::fs::read_dir(pkg_dir) else {
+        return (removed, failed);
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_file() && path != expected_archive {
+            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            let is_archive = matches!(ext, "gz" | "xz" | "zip" | "bz2" | "zst" | "7z")
+                || name.ends_with(".tar.gz")
+                || name.ends_with(".tar.xz")
+                || name.ends_with(".tar.bz2")
+                || name.ends_with(".tar.zst");
+            if is_archive {
+                match std::fs::remove_file(&path) {
+                    Ok(_) => removed += 1,
+                    Err(_) => failed += 1,
+                }
+            }
+        }
+    }
+
+    (removed, failed)
 }
 
 /// Install a single package (used by cmd_sync and dependency resolution).
@@ -311,11 +362,8 @@ async fn install_single_package(
     };
 
     if needed {
-        if let Ok(Some(existing)) = db
-            .get_package(&pkg_ref.forge.to_string(), &pkg_ref.owner, &pkg_ref.repo)
-            .await
-        {
-            if existing.version == release.tag {
+        match check_needed_skip(db, &pkg_ref.forge.to_string(), &pkg_ref.owner, &pkg_ref.repo, &release.tag).await {
+            Ok(true) => {
                 println!(
                     "  {}",
                     format!(
@@ -325,8 +373,14 @@ async fn install_single_package(
                     )
                     .dimmed()
                 );
-                return Ok(existing.id.unwrap_or(-1));
+                return Ok(db
+                    .get_package(&pkg_ref.forge.to_string(), &pkg_ref.owner, &pkg_ref.repo)
+                    .await?
+                    .and_then(|p| p.id)
+                    .unwrap_or(-1));
             }
+            Err(e) => tracing::warn!("Failed to check needed skip: {e}"),
+            _ => {}
         }
     }
 
@@ -853,11 +907,8 @@ pub async fn cmd_sync(ctx: &CommandContext<'_>, packages: &[String]) -> Result<(
 
         // --needed: skip if already installed at this version
         if ctx.cli.needed {
-            if let Ok(Some(existing)) = db
-                .get_package(&pkg_ref.forge.to_string(), &pkg_ref.owner, &pkg_ref.repo)
-                .await
-            {
-                if existing.version == release.tag {
+            match check_needed_skip(&db, &pkg_ref.forge.to_string(), &pkg_ref.owner, &pkg_ref.repo, &release.tag).await {
+                Ok(true) => {
                     println!(
                         "  {}",
                         format!(
@@ -869,6 +920,8 @@ pub async fn cmd_sync(ctx: &CommandContext<'_>, packages: &[String]) -> Result<(
                     );
                     continue;
                 }
+                Err(e) => tracing::warn!("Failed to check needed skip: {e}"),
+                _ => {}
             }
         }
 
@@ -1326,29 +1379,9 @@ pub async fn cmd_clean_cache(ctx: &CommandContext<'_>) -> Result<()> {
             continue;
         }
         let expected_archive = pkg_dir.join(&pkg.asset_filename);
-        for entry in std::fs::read_dir(&pkg_dir)? {
-            let entry = match entry {
-                Ok(e) => e,
-                Err(_) => continue,
-            };
-            let path = entry.path();
-            if path.is_file() && path != expected_archive {
-                // Only remove files that look like release archives
-                let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                let is_archive = matches!(ext, "gz" | "xz" | "zip" | "bz2" | "zst" | "7z")
-                    || name.ends_with(".tar.gz")
-                    || name.ends_with(".tar.xz")
-                    || name.ends_with(".tar.bz2")
-                    || name.ends_with(".tar.zst");
-                if is_archive {
-                    match std::fs::remove_file(&path) {
-                        Ok(_) => removed += 1,
-                        Err(_) => failed += 1,
-                    }
-                }
-            }
-        }
+        let (r, f) = clean_package_dir(&pkg_dir, &expected_archive);
+        removed += r;
+        failed += f;
     }
 
     println!("  Removed {removed} orphaned archive(s)");
@@ -1757,4 +1790,205 @@ async fn upgrade_single_package(
         .with_context(|| "Failed to update package record")?;
 
     Ok(installed_bins)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use grel_cache::{Database, models::InstalledPackage};
+
+    fn make_temp_dir(label: &str) -> std::path::PathBuf {
+        let tmp = std::env::temp_dir().join(format!("grel-sync-test-{label}-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        tmp
+    }
+
+    fn cleanup(tmp: &std::path::Path) {
+        let _ = std::fs::remove_dir_all(tmp);
+    }
+
+    // -----------------------------------------------------------------------
+    // check_needed_skip
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn check_needed_skip_returns_true_when_version_matches() {
+        let tmp = make_temp_dir("needed-skip-true");
+        let db = Database::init(&tmp.join("test.sqlite")).await.expect("init db");
+
+        let mut pkg = InstalledPackage::new("github".into(), "owner".into(), "repo".into());
+        pkg.version = "1.2.3".into();
+        pkg.is_managed = true;
+        db.upsert_package(&pkg).await.expect("upsert");
+
+        let should_skip = check_needed_skip(&db, "github", "owner", "repo", "1.2.3")
+            .await
+            .expect("check_needed_skip");
+
+        assert!(should_skip, "expected skip when version matches");
+
+        db.close().await;
+        cleanup(&tmp);
+    }
+
+    #[tokio::test]
+    async fn check_needed_skip_returns_false_when_version_differs() {
+        let tmp = make_temp_dir("needed-skip-false");
+        let db = Database::init(&tmp.join("test.sqlite")).await.expect("init db");
+
+        let mut pkg = InstalledPackage::new("github".into(), "owner".into(), "repo".into());
+        pkg.version = "1.2.3".into();
+        pkg.is_managed = true;
+        db.upsert_package(&pkg).await.expect("upsert");
+
+        let should_skip = check_needed_skip(&db, "github", "owner", "repo", "2.0.0")
+            .await
+            .expect("check_needed_skip");
+
+        assert!(!should_skip, "expected no skip when version differs");
+
+        db.close().await;
+        cleanup(&tmp);
+    }
+
+    #[tokio::test]
+    async fn check_needed_skip_returns_false_when_package_missing() {
+        let tmp = make_temp_dir("needed-skip-missing");
+        let db = Database::init(&tmp.join("test.sqlite")).await.expect("init db");
+
+        let should_skip = check_needed_skip(&db, "github", "owner", "repo", "1.0.0")
+            .await
+            .expect("check_needed_skip");
+
+        assert!(!should_skip, "expected no skip when package not installed");
+
+        db.close().await;
+        cleanup(&tmp);
+    }
+
+    // -----------------------------------------------------------------------
+    // clean_package_dir
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn clean_package_dir_removes_stale_archives() {
+        let tmp = make_temp_dir("clean-dir");
+        let pkg_dir = tmp.join("pkg");
+        std::fs::create_dir_all(&pkg_dir).unwrap();
+
+        let current = pkg_dir.join("tool-v2.tar.gz");
+        let stale1 = pkg_dir.join("tool-v1.tar.gz");
+        let stale2 = pkg_dir.join("tool-v1.zip");
+        let other = pkg_dir.join("README.md");
+
+        std::fs::File::create(&current).unwrap();
+        std::fs::File::create(&stale1).unwrap();
+        std::fs::File::create(&stale2).unwrap();
+        std::fs::File::create(&other).unwrap();
+
+        let (removed, failed) = clean_package_dir(&pkg_dir, &current);
+
+        assert_eq!(removed, 2, "expected 2 stale archives removed");
+        assert_eq!(failed, 0, "expected 0 failures");
+        assert!(current.exists(), "current archive should be kept");
+        assert!(!stale1.exists(), "stale archive 1 should be removed");
+        assert!(!stale2.exists(), "stale archive 2 should be removed");
+        assert!(other.exists(), "non-archive file should be kept");
+
+        cleanup(&tmp);
+    }
+
+    #[test]
+    fn clean_package_dir_keeps_only_expected_archive() {
+        let tmp = make_temp_dir("clean-keep");
+        let pkg_dir = tmp.join("pkg");
+        std::fs::create_dir_all(&pkg_dir).unwrap();
+
+        let expected = pkg_dir.join("expected.tar.xz");
+        std::fs::File::create(&expected).unwrap();
+
+        let (removed, failed) = clean_package_dir(&pkg_dir, &expected);
+
+        assert_eq!(removed, 0);
+        assert_eq!(failed, 0);
+        assert!(expected.exists());
+
+        cleanup(&tmp);
+    }
+
+    // -----------------------------------------------------------------------
+    // save_manifest_to_dir
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn save_manifest_to_dir_writes_toml() {
+        let tmp = make_temp_dir("save-manifest");
+        let manifest = grel_core::Manifest {
+            name: "test-pkg".into(),
+            description: "A test package".into(),
+            license: "MIT".into(),
+            source: Default::default(),
+            assets: Default::default(),
+            checksum_filename: Default::default(),
+            signature_filename: Default::default(),
+            signature_kind: Default::default(),
+            dependencies: Default::default(),
+            hooks: Default::default(),
+        };
+
+        save_manifest_to_dir(&manifest, &tmp).expect("save_manifest_to_dir");
+
+        let manifest_path = tmp.join(".grel.toml");
+        assert!(manifest_path.exists(), "manifest file should be created");
+
+        let content = std::fs::read_to_string(&manifest_path).unwrap();
+        assert!(content.contains("test-pkg"), "manifest should contain package name");
+        assert!(content.contains("MIT"), "manifest should contain license");
+
+        cleanup(&tmp);
+    }
+
+    // -----------------------------------------------------------------------
+    // run_hook
+    // -----------------------------------------------------------------------
+
+    #[test]
+    #[cfg(unix)]
+    fn run_hook_executes_successfully() {
+        let tmp = make_temp_dir("run-hook");
+        let marker = tmp.join("hook_ran");
+
+        run_hook(
+            &format!("touch {}", marker.display()),
+            &tmp,
+            "post_install",
+        );
+
+        assert!(marker.exists(), "hook should have created marker file");
+
+        cleanup(&tmp);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn run_hook_handles_failure_gracefully() {
+        let tmp = make_temp_dir("run-hook-fail");
+
+        // This should not panic
+        run_hook("exit 1", &tmp, "pre_remove");
+
+        cleanup(&tmp);
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn run_hook_graceful_on_windows() {
+        let tmp = make_temp_dir("run-hook-win");
+
+        // run_hook uses 'sh' which is not available on Windows;
+        // it should print a warning but not panic.
+        run_hook("echo hello", &tmp, "post_install");
+
+        cleanup(&tmp);
+    }
 }

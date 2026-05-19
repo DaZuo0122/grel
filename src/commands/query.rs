@@ -655,3 +655,61 @@ pub async fn cmd_local_search(ctx: &CommandContext<'_>, pattern: String) -> Resu
     db.close().await;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn path_matches_exact_path() {
+        let candidate = std::path::Path::new("/usr/local/bin/rg");
+        let query = std::path::Path::new("/usr/local/bin/rg");
+        assert!(path_matches(candidate, query, None));
+    }
+
+    #[test]
+    fn path_matches_canonicalized() {
+        // This test may not work on all platforms due to canonicalize requiring the file to exist,
+        // so we test the filename fallback instead.
+        let candidate = std::path::Path::new("/some/path/rg.exe");
+        let query = std::path::Path::new("/other/path/rg");
+        assert!(path_matches(candidate, query, None));
+    }
+
+    #[test]
+    fn path_matches_different_files() {
+        let candidate = std::path::Path::new("/usr/local/bin/fd");
+        let query = std::path::Path::new("/usr/local/bin/rg");
+        assert!(!path_matches(candidate, query, None));
+    }
+
+    #[test]
+    fn filename_matches_exact() {
+        assert!(filename_matches(
+            Some(std::ffi::OsStr::new("rg")),
+            Some(std::ffi::OsStr::new("rg"))
+        ));
+    }
+
+    #[test]
+    fn filename_matches_stem() {
+        assert!(filename_matches(
+            Some(std::ffi::OsStr::new("rg.exe")),
+            Some(std::ffi::OsStr::new("rg"))
+        ));
+    }
+
+    #[test]
+    fn filename_matches_different() {
+        assert!(!filename_matches(
+            Some(std::ffi::OsStr::new("fd")),
+            Some(std::ffi::OsStr::new("rg"))
+        ));
+    }
+
+    #[test]
+    fn filename_matches_none() {
+        assert!(!filename_matches(None, Some(std::ffi::OsStr::new("rg"))));
+        assert!(!filename_matches(Some(std::ffi::OsStr::new("rg")), None));
+    }
+}

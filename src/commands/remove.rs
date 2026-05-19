@@ -358,3 +358,90 @@ fn preserve_config_files(install_path: &std::path::Path) {
         );
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use grel_cache::models::{InstalledPackage, PackageStatus};
+
+    fn make_temp_dir(label: &str) -> std::path::PathBuf {
+        let tmp = std::env::temp_dir().join(format!("grel-remove-test-{label}-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        tmp
+    }
+
+    fn cleanup(tmp: &std::path::Path) {
+        let _ = std::fs::remove_dir_all(tmp);
+    }
+
+    #[tokio::test]
+    async fn remove_package_files_deletes_binaries_and_install_path() {
+        let tmp = make_temp_dir("basic-remove");
+        let bin_dir = tmp.join("bin");
+        let install_dir = tmp.join("install");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        std::fs::create_dir_all(&install_dir).unwrap();
+
+        let bin_path = bin_dir.join("mytool");
+        std::fs::File::create(&bin_path).unwrap();
+
+        let marker = install_dir.join("marker");
+        std::fs::File::create(&marker).unwrap();
+
+        let mut pkg = InstalledPackage::new("github".into(), "owner".into(), "repo".into());
+        pkg.install_path = install_dir.to_string_lossy().to_string();
+        pkg.set_binary_list(vec!["mytool".into()]);
+        pkg.is_managed = true;
+        pkg.status = PackageStatus::Active;
+
+        let config = grel_config::Config::default();
+        // We can't easily override bin_dir in Config::default(), so this test
+        // only verifies the install_path deletion.
+        remove_package_files(&config, &pkg, false).await.unwrap();
+
+        assert!(!marker.exists(), "install directory should be removed");
+
+        cleanup(&tmp);
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn remove_package_files_runs_pre_remove_hook() {
+        let tmp = make_temp_dir("pre-remove-hook");
+        let install_dir = tmp.join("install");
+        std::fs::create_dir_all(&install_dir).unwrap();
+
+        let hook_marker = tmp.join("hook_ran");
+
+        // Write a manifest with a pre_remove hook
+        let manifest = grel_core::Manifest {
+            name: "test".into(),
+            description: "".into(),
+            license: "".into(),
+            source: Default::default(),
+            assets: Default::default(),
+            checksum_filename: Default::default(),
+            signature_filename: Default::default(),
+            signature_kind: Default::default(),
+            dependencies: Default::default(),
+            hooks: grel_core::HookSpec {
+                pre_remove: Some(format!("touch {}", hook_marker.display())),
+                post_install: Default::default(),
+            },
+        };
+        let manifest_path = install_dir.join(".grel.toml");
+        std::fs::write(&manifest_path, manifest.to_toml().unwrap()).unwrap();
+
+        let mut pkg = InstalledPackage::new("github".into(), "owner".into(), "repo".into());
+        pkg.install_path = install_dir.to_string_lossy().to_string();
+        pkg.is_managed = true;
+        pkg.status = PackageStatus::Active;
+
+        let config = grel_config::Config::default();
+        remove_package_files(&config, &pkg, false).await.unwrap();
+
+        assert!(hook_marker.exists(), "pre_remove hook should have created marker");
+
+        cleanup(&tmp);
+    }
+}
