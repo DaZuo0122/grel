@@ -239,6 +239,56 @@ pub async fn remove_package_files(
     pkg: &grel_cache::models::InstalledPackage,
     nosave: bool,
 ) -> Result<()> {
+    let install_path = std::path::Path::new(&pkg.install_path);
+
+    // Run pre_remove hook if present
+    let manifest_path = if install_path.is_dir() {
+        install_path.join(".grel.toml")
+    } else if let Some(parent) = install_path.parent() {
+        parent.join(".grel.toml")
+    } else {
+        std::path::PathBuf::new()
+    };
+
+    if manifest_path.exists() {
+        if let Ok(content) = std::fs::read_to_string(&manifest_path) {
+            if let Ok(manifest) = grel_core::Manifest::load_from_str(&content) {
+                if let Some(ref hook) = manifest.hooks.pre_remove {
+                    println!("  Running pre_remove hook...");
+                    let hook_dir = if install_path.is_dir() {
+                        install_path.to_path_buf()
+                    } else if let Some(parent) = install_path.parent() {
+                        parent.to_path_buf()
+                    } else {
+                        std::path::PathBuf::from(".")
+                    };
+                    let status = std::process::Command::new("sh")
+                        .arg("-c")
+                        .arg(hook)
+                        .current_dir(&hook_dir)
+                        .status();
+                    match status {
+                        Ok(s) if s.success() => {
+                            println!("  {}", "pre_remove hook completed".green());
+                        }
+                        Ok(s) => {
+                            eprintln!(
+                                "  {}",
+                                format!("pre_remove hook exited with status {s}").yellow()
+                            );
+                        }
+                        Err(e) => {
+                            eprintln!(
+                                "  {}",
+                                format!("Failed to run pre_remove hook: {e}").yellow()
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // Delete binaries from bin_dir
     for bin_name in pkg.binary_list() {
         let bin_path = config.paths.bin_dir.join(&bin_name);
@@ -248,7 +298,6 @@ pub async fn remove_package_files(
     }
 
     // Delete the install path
-    let install_path = std::path::Path::new(&pkg.install_path);
     if install_path.exists() {
         if install_path.is_dir() {
             if !nosave {

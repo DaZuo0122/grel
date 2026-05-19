@@ -60,6 +60,11 @@ impl Manifest {
         toml::from_str(s).map_err(ManifestError::from)
     }
 
+    /// Serialize the manifest to a TOML string.
+    pub fn to_toml(&self) -> Result<String, ManifestError> {
+        toml::to_string_pretty(self).map_err(ManifestError::from)
+    }
+
     /// Resolve the best asset for the given platform and version.
     ///
     /// Substitutes `{version}` in the filename pattern with the provided
@@ -211,6 +216,9 @@ pub struct HookSpec {
 pub enum ManifestError {
     #[error("Failed to parse manifest TOML: {0}")]
     ParseError(#[from] toml::de::Error),
+
+    #[error("Failed to serialize manifest TOML: {0}")]
+    SerializeError(#[from] toml::ser::Error),
 }
 
 #[allow(clippy::unwrap_used)]

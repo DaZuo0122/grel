@@ -135,6 +135,39 @@ async fn resolve_manifest(
     None
 }
 
+/// Save manifest to the package install directory for later use (e.g., pre_remove hooks).
+fn save_manifest_to_dir(
+    manifest: &grel_core::Manifest,
+    install_dir: &std::path::Path,
+) -> Result<()> {
+    let manifest_path = install_dir.join(".grel.toml");
+    let content = manifest.to_toml().map_err(|e| anyhow::anyhow!("{e}"))?;
+    std::fs::write(&manifest_path, content)
+        .with_context(|| format!("Failed to write manifest to {}", manifest_path.display()))?;
+    Ok(())
+}
+
+/// Run a hook script from the package install directory.
+fn run_hook(hook: &str, install_dir: &std::path::Path, label: &str) {
+    println!("  Running {label} hook...");
+    let status = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(hook)
+        .current_dir(install_dir)
+        .status();
+    match status {
+        Ok(s) if s.success() => println!("  {}", format!("{label} hook completed").green()),
+        Ok(s) => eprintln!(
+            "  {}",
+            format!("{label} hook exited with status {s}").yellow()
+        ),
+        Err(e) => eprintln!(
+            "  {}",
+            format!("Failed to run {label} hook: {e}").yellow()
+        ),
+    }
+}
+
 /// Install a single package (used by cmd_sync and dependency resolution).
 #[allow(clippy::too_many_arguments)]
 async fn install_single_package(
@@ -370,6 +403,18 @@ async fn install_single_package(
         .iter()
         .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
         .collect();
+
+    // Save manifest and run post_install hook
+    if let Some((ref manifest, _)) = manifest {
+        if let Err(e) = save_manifest_to_dir(manifest, &install_dir) {
+            tracing::warn!("Failed to save manifest: {e}");
+        }
+        if !download_only {
+            if let Some(ref hook) = manifest.hooks.post_install {
+                run_hook(hook, &install_dir, "post_install");
+            }
+        }
+    }
 
     if is_managed && !config.general.keep_archives && archive_path.exists() {
         std::fs::remove_file(&archive_path).ok();
@@ -900,6 +945,18 @@ pub async fn cmd_sync(ctx: &CommandContext<'_>, packages: &[String]) -> Result<(
             .iter()
             .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
             .collect();
+
+        // Save manifest and run post_install hook
+        if let Some((ref manifest, _)) = manifest {
+            if let Err(e) = save_manifest_to_dir(manifest, &install_dir) {
+                tracing::warn!("Failed to save manifest: {e}");
+            }
+            if !ctx.cli.download_only {
+                if let Some(ref hook) = manifest.hooks.post_install {
+                    run_hook(hook, &install_dir, "post_install");
+                }
+            }
+        }
 
         if !ctx.cli.download_only {
             check_elf_deps(&installed_binaries, ctx, &db).await;
