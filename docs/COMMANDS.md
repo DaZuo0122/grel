@@ -26,6 +26,7 @@ These are available with any operation:
 | `--registry <URL>` / `--no-registry` | Toggle central registry lookup |
 | `--auto-resolve-deps` / `--no-auto-resolve-deps` | Toggle ELF system-dependency resolution (Linux) |
 | `--show-parsed-deps` / `--no-show-parsed-deps` | Toggle printing discovered ELF dependencies |
+| `--enable-hooks` / `--no-enable-hooks` | Allow / suppress manifest install/removal hooks |
 | `--exclude-keywords <K1,K2>` | Temporarily add keywords to the exclusion list |
 | `--dry-run` | Simulate without writing files |
 | `--noconfirm` | Skip all interactive prompts |
@@ -44,7 +45,9 @@ These are available with any operation:
 | `-u, --sysupgrade` | Upgrade all installed packages |
 | `-i, --info <PKG>` | Show remote release metadata before installing |
 | `-c, --clean` | Purge downloaded artifacts from cache |
+| `-w, --download-only` | Download archive only, skip extraction |
 | `--overwrite` | Replace existing binaries if they conflict |
+| `--needed` | Skip install if package is already up-to-date |
 | `--asset <NAME>` | Download exact asset filename (bypass auto-selection) |
 | `--platform <OS/ARCH>` | Override host platform detection (e.g., `linux/x86_64`) |
 | `--allow-format <FMT>` | Temporarily allow a normally ignored format |
@@ -68,7 +71,10 @@ grel -S --dry-run foo/bar    # Simulate install
 **Notes:**
 - Package references can be `owner/repo`, `forge/owner/repo`, or `owner/repo@version`.
 - The default forge is `github` unless overridden by `-f`.
-- `-Sc` currently cleans `download_dir` only; archive retention under `install_root` is controlled by `keep_archives` in config.
+- `-Sc` cleans `download_dir` and removes stale archives under `install_root` (keeps the current `asset_filename`).
+- `--needed` compares the installed DB version against the remote release tag; skips if they match.
+- `-Sw` sets `is_managed = false`; the archive is left in `download_dir`.
+- Manifest `post_install` hooks run after extraction only when `enable_hooks = true` (disabled by default).
 
 ---
 
@@ -103,7 +109,8 @@ grel -Qs ripgrep             # Search installed packages
 ```
 
 **Notes:**
-- `-Qo` matches by install path, asset filename, and filesystem walk. It does not yet use a persistent file index for O(1) lookups.
+- `-Qo` uses the `package_files` DB index first (exact path, canonical path, filename, stem match), with a filesystem walk fallback for unindexed packages.
+- `-Ql` uses the `package_files` DB index first, with a filesystem walk fallback for unindexed packages.
 - `-Qk` verifies the **downloaded archive** checksum, not individual extracted files.
 - `--orphans` is deprecated; use `-t` instead.
 
@@ -133,6 +140,7 @@ grel -Rcn foo/bar            # Cascade + nosave
 
 **Notes:**
 - `--nosave` skips preserving files that look like configs (by extension). Config preservation is heuristic-based, not metadata-based.
+- `pre_remove` hooks from the saved `.grel.toml` manifest run before deletion when `enable_hooks = true`.
 
 ---
 
@@ -206,7 +214,8 @@ grel -Fy                     # Reindex all packages
 ```
 
 **Notes:**
-- File search currently walks the filesystem. There is no persistent `package_files` database index yet.
+- `-Fs` and `-Fl` query the persistent `package_files` DB index first, with a filesystem fallback for unindexed packages.
+- `-Fy` rebuilds the index by walking all managed packages and persisting the file list to `package_files`.
 - `-Fl` without a package argument will report an error (do not run bare `grel -Fl`).
 
 ---
@@ -226,6 +235,6 @@ grel -Fy                     # Reindex all packages
 |-----------|-----------|
 | `-S` | `grel-cli` → `grel-core/resolver` → `grel-network/download` → `grel-cache/install` |
 | `-Syu` | `grel-core/upgrade` → parallel download → atomic replace |
-| `-Q/-F` | `grel-cache/sqlite` (read-only queries, filesystem walks) |
+| `-Q/-F` | `grel-cache/sqlite` (read-only queries, `package_files` index, filesystem fallback) |
 | `-R/-D` | `grel-cache/state` (DB updates, orphan marking, migration, cleanup) |
 | `-U` | `grel-network/archive` → `grel-cache/install` |

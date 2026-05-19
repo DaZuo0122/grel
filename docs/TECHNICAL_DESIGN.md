@@ -224,10 +224,21 @@ CREATE TABLE system_dep_cache (
     discovered_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
     PRIMARY KEY (library_name, distro_id)
 );
+
+CREATE TABLE package_files (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    package_id INTEGER NOT NULL,
+    file_path TEXT NOT NULL,
+    file_type TEXT NOT NULL DEFAULT 'data',
+    FOREIGN KEY (package_id) REFERENCES installed(id) ON DELETE CASCADE
+);
+CREATE UNIQUE INDEX idx_pkg_file_unique ON package_files(package_id, file_path);
+CREATE INDEX idx_pkg_file_path ON package_files(file_path);
 ```
 - `is_managed`: `true` = auto-extracted/linked to `bin/`; `false` = left in `download_dir`
 - `install_path`: Stores actual destination for accurate cleanup/migration
 - `dependencies.dep_target`: Unified target string. Grel packages use `forge/owner/repo`; system libraries use `system:libname` (e.g., `system:libssl.so.3`)
+- `package_files`: Tracks all extracted files per package with type hints (`binary`, `archive`, `config`, `doc`, `data`). Enables fast `-Ql`, `-Fl`, `-Fs`, `-Qo` and conflict detection.
 
 ---
 

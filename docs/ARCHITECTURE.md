@@ -78,7 +78,7 @@ CLI (-Syu)
 CLI (-Q / -Qi / -Ql / -Qo)
   → main.rs dispatches to commands::query
     → grel-cache: SQLite read-only queries
-    → filesystem walks for file listing / ownership (pending persistent index)
+    → package_files index lookups (with filesystem fallback for unindexed packages)
 ```
 
 ---
@@ -194,6 +194,22 @@ CREATE TABLE system_dep_cache (
 
 Caches `lib_name → package_name` mappings discovered by `grel-elf` to avoid slow package-manager queries.
 
+### `package_files`
+
+```sql
+CREATE TABLE package_files (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    package_id INTEGER NOT NULL,
+    file_path TEXT NOT NULL,
+    file_type TEXT NOT NULL DEFAULT 'data',
+    FOREIGN KEY (package_id) REFERENCES installed(id) ON DELETE CASCADE
+);
+CREATE UNIQUE INDEX idx_pkg_file_unique ON package_files(package_id, file_path);
+CREATE INDEX idx_pkg_file_path ON package_files(file_path);
+```
+
+Tracks every file extracted by a managed package. Used for fast `-Ql`, `-Fl`, `-Fs`, `-Qo` lookups and conflict detection during install. Rebuilt by `-Fy`.
+
 ---
 
 ## Manifest Resolution (3-Tier)
@@ -208,7 +224,7 @@ A manifest can declare:
 - Exact asset patterns per platform
 - Grel dependencies (`dependencies.grel`)
 - Optional dependencies
-- Hook scripts (`post_install`, `pre_remove`) — **defined but not yet executed**
+- Hook scripts (`post_install`, `pre_remove`) — executed when `enable_hooks = true` (disabled by default)
 
 ---
 

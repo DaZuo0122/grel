@@ -45,6 +45,7 @@ gitea_token = ""                 # Prefer env $GREL_AUTH_GITEA_TOKEN
 
 [security]
 verify_signatures = false        # Check for .sig/.asc sidecar files (not full crypto verify)
+enable_hooks = false             # Allow manifest post_install/pre_remove hooks to run (disabled by default for security)
 
 [registry]
 url = "https://github.com/grel-registry/packages"
@@ -133,6 +134,7 @@ Lists and maps are supported via Figment's env syntax (consult Figment docs for 
 | Key | Default | Description |
 |-----|---------|-------------|
 | `verify_signatures` | `false` | If `true`, requires a `.sig` or `.asc` sidecar file to exist in the release. **Note:** This checks for file presence only; it does not cryptographically verify signatures. |
+| `enable_hooks` | `false` | If `true`, allows manifest `post_install` and `pre_remove` hooks to execute. **Disabled by default** for security — only enable if you trust the packages you install. |
 
 ### `[registry]`
 
