@@ -927,9 +927,17 @@ impl Database {
 mod tests {
     use super::*;
     use crate::models::{InstalledPackage, PackageFile, PackageStatus};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static TEST_DB_COUNTER: AtomicU64 = AtomicU64::new(0);
 
     async fn open_test_db() -> Database {
-        let tmp = std::env::temp_dir().join(format!("grel-test-db-{}", std::process::id()));
+        let id = TEST_DB_COUNTER.fetch_add(1, Ordering::SeqCst);
+        let tmp = std::env::temp_dir().join(format!(
+            "grel-test-db-{}-{}",
+            std::process::id(),
+            id
+        ));
         let _ = std::fs::remove_file(&tmp);
         Database::init(&tmp).await.expect("open test db")
     }
