@@ -1,5 +1,7 @@
 //! Integration tests for the grel-elf public API.
 
+#![allow(clippy::unwrap_used)]
+
 use grel_config::ElfDepConfig;
 use grel_elf::resolve_elf_deps;
 

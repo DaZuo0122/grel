@@ -1,6 +1,8 @@
 //! Integration tests for the `system_dep_cache` SQLite table introduced by
 //! the ELF dependency auto-resolution feature.
 
+#![allow(clippy::unwrap_used)]
+
 use grel_cache::Database;
 
 // ---------------------------------------------------------------------------

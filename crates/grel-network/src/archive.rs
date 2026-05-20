@@ -44,6 +44,7 @@ pub fn install_asset(
     install_dir: &Path,
     bin_dir: &Path,
     asset_filename: &str,
+    overwrite: bool,
 ) -> Result<InstallResult, NetworkError> {
     std::fs::create_dir_all(install_dir)
         .map_err(|e| NetworkError::OperationFailed(format!("Failed to create install dir: {e}")))?;
@@ -53,15 +54,15 @@ pub fn install_asset(
     match ext {
         ArchiveType::Zip => {
             extract_zip(archive_path, install_dir)?;
-            link_binaries(install_dir, bin_dir, asset_filename)
+            link_binaries(install_dir, bin_dir, asset_filename, overwrite)
         }
         ArchiveType::TarGz | ArchiveType::Tgz => {
             extract_tar_gz(archive_path, install_dir)?;
-            link_binaries(install_dir, bin_dir, asset_filename)
+            link_binaries(install_dir, bin_dir, asset_filename, overwrite)
         }
         ArchiveType::TarXz => {
             extract_tar_xz(archive_path, install_dir)?;
-            link_binaries(install_dir, bin_dir, asset_filename)
+            link_binaries(install_dir, bin_dir, asset_filename, overwrite)
         }
         ArchiveType::Plain => {
             install_plain_binary(archive_path, install_dir, bin_dir, asset_filename)
@@ -271,7 +272,7 @@ fn install_plain_binary(
     // Symlink/hardlink/copy from bin_dir → install_dir so that sibling DLLs
     // (Windows) or SOs can still be found relative to the real location.
     let link_path = bin_dir.join(filename);
-    create_binary_link(&dest, &link_path)?;
+    create_binary_link(&dest, &link_path, false)?;
 
     Ok(InstallResult {
         install_dir: install_dir.to_path_buf(),
@@ -285,6 +286,7 @@ fn link_binaries(
     install_dir: &Path,
     bin_dir: &Path,
     _archive_name: &str,
+    overwrite: bool,
 ) -> Result<InstallResult, NetworkError> {
     // Ensure bin_dir exists before we attempt to create any links inside it.
     std::fs::create_dir_all(bin_dir)
@@ -294,7 +296,7 @@ fn link_binaries(
     let mut installed = Vec::new();
 
     if extracted.exists() {
-        collect_binaries(&extracted, bin_dir, &mut installed)?;
+        collect_binaries(&extracted, bin_dir, &mut installed, overwrite)?;
     }
 
     // If no binaries found in extracted/, check if the archive contained
@@ -308,8 +310,11 @@ fn link_binaries(
             })?;
             let path = entry.path();
             if path.is_file() && is_executable(&path) {
-                let dest = bin_dir.join(path.file_name().unwrap());
-                create_binary_link(&path, &dest)?;
+                let Some(name) = path.file_name() else {
+                    continue;
+                };
+                let dest = bin_dir.join(name);
+                create_binary_link(&path, &dest, overwrite)?;
                 installed.push(dest);
             }
         }
@@ -327,6 +332,7 @@ fn collect_binaries(
     dir: &Path,
     bin_dir: &Path,
     installed: &mut Vec<PathBuf>,
+    overwrite: bool,
 ) -> Result<(), NetworkError> {
     for entry in std::fs::read_dir(dir)
         .map_err(|e| NetworkError::OperationFailed(format!("Failed to read directory: {e}")))?
@@ -336,10 +342,13 @@ fn collect_binaries(
         let path = entry.path();
 
         if path.is_dir() {
-            collect_binaries(&path, bin_dir, installed)?;
+            collect_binaries(&path, bin_dir, installed, overwrite)?;
         } else if path.is_file() && is_executable(&path) {
-            let dest = bin_dir.join(path.file_name().unwrap());
-            create_binary_link(&path, &dest)?;
+            let Some(name) = path.file_name() else {
+                continue;
+            };
+            let dest = bin_dir.join(name);
+            create_binary_link(&path, &dest, overwrite)?;
             installed.push(dest);
         }
     }
@@ -351,7 +360,11 @@ fn collect_binaries(
 ///
 /// This is preferred over copying because some executables depend on
 /// sibling DLLs/SOs that remain in the extracted tree.
-fn create_binary_link(target: &Path, dest: &Path) -> Result<(), NetworkError> {
+fn create_binary_link(target: &Path, dest: &Path, overwrite: bool) -> Result<(), NetworkError> {
+    if overwrite && dest.exists() {
+        std::fs::remove_file(dest).ok();
+    }
+
     // Try symlink first
     if symlink_binary(target, dest).is_ok() {
         return Ok(());
@@ -547,6 +560,7 @@ fn sanitize_tar_path(entry_path: &Path) -> Result<String, NetworkError> {
     Ok(result.to_string_lossy().to_string())
 }
 
+#[allow(clippy::unwrap_used)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -690,7 +704,7 @@ mod tests {
             std::fs::set_permissions(&bin_path, p).unwrap();
         }
 
-        let result = link_binaries(&install_dir, &bin_dir, "mytool.tar.gz");
+        let result = link_binaries(&install_dir, &bin_dir, "mytool.tar.gz", false);
         assert!(
             result.is_ok(),
             "link_binaries should not fail: {:?}",

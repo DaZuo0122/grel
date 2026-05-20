@@ -317,6 +317,7 @@ pub fn detect_version_from_tag(tag: &str) -> Option<String> {
 // Tests
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::unwrap_used)]
 #[cfg(test)]
 mod tests {
     use super::*;

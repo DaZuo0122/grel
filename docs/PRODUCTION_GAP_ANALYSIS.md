@@ -1,3 +1,5 @@
+> **Note:** This is a strategic analysis document from 2026-05-09. It remains broadly valid for long-term planning but does not reflect recent fixes. For current implementation status, see [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md).
+
 # grel Production Gap Analysis
 
 > **Date:** 2026-05-09  
@@ -61,7 +63,7 @@ The gaps below are categorized by severity: **Critical** (blocks production use)
 |-----|----------|-------------|------------|
 | **No Multi-Package Atomic Transactions** | 🔴 Critical | Installing 5 packages can fail halfway through, leaving the system in an inconsistent state (some packages installed, some not). There is no rollback mechanism. | `apt` and `pacman` use staging + atomic swap; `nix` is inherently atomic (store paths). |
 | **No Rollback / Undo** | 🟠 Major | If an upgrade breaks a binary, there is no `grel undo` or `grel downgrade`. Old versions are not retained (except archives if `keep_archives = true`, but no downgrade logic exists). | `pacman` caches in `/var/cache/pacman/pkg`; `nix` keeps all generations; `snapper` + `apt` can rollback. |
-| **No Pre/Post Install Hooks** | 🟠 Major | No `pre_install`, `post_install`, `pre_remove`, `post_remove` hooks. Desktop files are not updated, shell completions are not installed, `mandb` is not refreshed. | Standard in virtually every PM. |
+| **Pre/Post Install Hooks** | 🟠 Major | `post_install` and `pre_remove` hooks are implemented but **disabled by default** (`enable_hooks = false`). When enabled, they run shell commands from the manifest. No `post_remove` hook yet. | Standard in virtually every PM. |
 | **Partial Failure on Upgrade** | 🟠 Major | `cmd_upgrade` handles single packages but does not wrap a multi-package upgrade in a transaction. A network blip during `grel -Syu` can leave some packages updated and others stale. | `pacman` stages everything before swapping. |
 | **No Filesystem Snapshot Integration** | 🟡 Minor | No integration with `btrfs` snapshots, `zfs` snapshots, or `overlayfs` for atomic testing of upgrades. | `snapper` + `zypper`; `rpm-ostree`. |
 
@@ -83,9 +85,8 @@ The gaps below are categorized by severity: **Critical** (blocks production use)
 
 | Gap | Severity | Description | Comparison |
 |-----|----------|-------------|------------|
-| **Incomplete File Tracking** | 🟠 Major | `grel` tracks only `installed_binaries` (executables). It does not track all extracted files (libraries, config files, documentation, man pages). | `pacman` `FILES` db; `dpkg -L`; `rpm -ql`. |
-| **No File Index (`-F`)** | 🟠 Major | The `-F` operation is almost entirely stubbed. Cannot search for "which package owns `/usr/share/doc/foo/README.md`" or list all files in a package. | `pacman -F`, `apt-file`, `rpm -qf`. |
-| **No Conflict Detection** | 🟠 Major | If two packages extract a file with the same name to `bin_dir/`, `grel` has no mechanism to detect or resolve this. `--overwrite` exists as a stub. | `pacman` checks for file conflicts before installing. |
+| **File Tracking** | 🟡 Minor | `package_files` table now tracks all extracted files with type hints. `-Ql`, `-Fl`, `-Fs`, `-Qo` use this index with filesystem fallback. | `pacman` `FILES` db; `dpkg -L`; `rpm -ql`. |
+| **Conflict Detection** | 🟡 Minor | `find_conflicting_files()` detects overlapping paths with other packages and prints warnings during install. Does not yet block installation or offer resolution. | `pacman` checks for file conflicts before installing. |
 | **No Configuration File Handling** | 🟠 Major | No distinction between "config file that should be preserved on upgrade" and "binary that should be replaced". No `.pacnew` / `.dpkg-dist` logic. | `pacman` `.pacnew`; `dpkg` conffiles; `rpm` `%config(noreplace)`. |
 | **No Man Page / Completion Registration** | 🟡 Minor | Extracted man pages and shell completions are not registered with `man-db` or shell completion systems. | Standard in distro PMs. |
 
@@ -172,7 +173,7 @@ The gaps below are categorized by severity: **Critical** (blocks production use)
 
 | Gap | Severity | Description | Comparison |
 |-----|----------|-------------|------------|
-| `--asexplicit` / `--asdeps` Stubs | 🟡 Minor | These flags are accepted but do nothing. Without them, `grel` cannot distinguish manually-installed packages from transitive ones (though there are no transitive installs yet). | `pacman -D --asexplicit`; `apt-mark`. |
+| `--asexplicit` / `--asdeps` | ✅ Done | Fully implemented in both `-S` (during install) and `-D` (mark existing). | `pacman -D --asexplicit`; `apt-mark`. |
 
 ---
 
@@ -189,10 +190,10 @@ The gaps below are categorized by severity: **Critical** (blocks production use)
 6. **Retry & resume:** Implement `Range:` resume, exponential backoff, and configurable retries.
 
 ### Phase 3: System Integration
-7. **File index:** Track *all* extracted files in the DB, not just binaries. Implement `-Fl` and `-Fs` properly.
-8. **Conflict detection:** Before installing, check if any extracted file would overwrite an existing tracked file.
+7. ~~File index~~ ✅ Done: `package_files` table tracks all extracted files.
+8. ~~Conflict detection~~ ✅ Done: Warns when installing packages with overlapping file paths.
 9. **Config file preservation:** Implement `.grelnew` logic for files the user may have edited.
-10. **Hooks:** Support `pre_install`, `post_install`, `pre_remove`, `post_remove` scripts (or at least document how to add them via manifest files).
+10. **Hooks:** `post_install` and `pre_remove` are implemented (disabled by default). Add `pre_install` / `post_remove`.
 
 ### Phase 4: Repository Infrastructure
 11. **Manifest format:** Define a `grel.toml` or `.grel` manifest format that upstream projects can commit to their repos, specifying exact asset patterns, dependencies, hooks, and metadata.
@@ -200,7 +201,7 @@ The gaps below are categorized by severity: **Critical** (blocks production use)
 
 ### Phase 5: Operational Polish
 13. **Complete GitLab/Gitea/Codeberg providers.**
-14. **Implement `--asexplicit`, `--asdeps`, `--overwrite`, `--asset`, `--platform`, `--allow-format`.**
+14. ~~Implement `--asexplicit`, `--asdeps`, `--overwrite`, `--asset`, `--platform`, `--allow-format`.~~ ✅ Done.
 15. **Wire ETag and DNS cache.**
 16. **Add `grel doctor`, man pages, shell completions, and signed releases.**
 17. **Self-update mechanism or distribution packages.**

@@ -38,7 +38,8 @@ use grel_core::Forge;
     version,
     about = "A package manager for pre-built binaries from Git forges",
     long_about = None,
-    override_usage = "grel <OPERATION> [OPTIONS] [TARGETS...]"
+    override_usage = "grel <OPERATION> [OPTIONS] [TARGETS...]",
+    disable_help_flag = true
 )]
 pub struct Cli {
     // -----------------------------------------------------------------------
@@ -72,7 +73,7 @@ pub struct Cli {
         help = "Remove packages",
         long_help = "Uninstall packages from the system.\n\
                      Sub-options: -c (cascade), -n (nosave),\n\
-                     -s (recursive), -u (unneeded), --noconfirm, --dry-run"
+                     -r (recursive), -u (unneeded), --noconfirm, --dry-run"
     )]
     pub op_remove: bool,
 
@@ -145,6 +146,20 @@ pub struct Cli {
         help = "Purge artifact cache (with -S) or cascade (with -R)"
     )]
     pub clean: bool,
+
+    /// -w: Download only (with -S)
+    #[arg(
+        short = 'w', long, action = clap::ArgAction::SetTrue,
+        help = "Download packages without installing (with -S)"
+    )]
+    pub download_only: bool,
+
+    /// --needed: Skip reinstall if up-to-date (with -S)
+    #[arg(
+        long, action = clap::ArgAction::SetTrue,
+        help = "Skip reinstall if package is already up-to-date (with -S)"
+    )]
+    pub needed: bool,
 
     // -----------------------------------------------------------------------
     // -Q (query) sub-options
@@ -247,20 +262,14 @@ pub struct Cli {
     #[arg(long, value_names = &["OLD", "NEW"], num_args = 2)]
     pub migrate: Option<Vec<String>>,
 
-    #[arg(long, action = clap::ArgAction::SetTrue)]
+    #[arg(long, action = clap::ArgAction::SetTrue, help = "Prune orphaned records and stale caches (with -D)")]
     pub db_clean: bool,
 
-    #[arg(long, action = clap::ArgAction::SetTrue)]
+    #[arg(long, action = clap::ArgAction::SetTrue, help = "Verify SQLite DB integrity (with -D)")]
     pub db_check: bool,
 
-    #[arg(long, action = clap::ArgAction::SetTrue)]
+    #[arg(long = "dump", action = clap::ArgAction::SetTrue, help = "Export state as JSON (with -D)")]
     pub db_dump: bool,
-
-    // -----------------------------------------------------------------------
-    // -U (upgrade local) sub-options
-    // -----------------------------------------------------------------------
-    #[arg(long, value_name = "PATH")]
-    pub local_asset: Option<String>,
 
     // -----------------------------------------------------------------------
     // Common/global options
@@ -270,35 +279,35 @@ pub struct Cli {
     pub targets: Vec<String>,
 
     /// --dry-run
-    #[arg(long, action = clap::ArgAction::SetTrue)]
+    #[arg(long, action = clap::ArgAction::SetTrue, help = "Simulate actions without writing files")]
     pub dry_run: bool,
 
     /// --noconfirm
-    #[arg(long, action = clap::ArgAction::SetTrue)]
+    #[arg(long, action = clap::ArgAction::SetTrue, help = "Skip all interactive prompts")]
     pub noconfirm: bool,
 
     /// --overwrite
-    #[arg(long, action = clap::ArgAction::SetTrue)]
+    #[arg(long, action = clap::ArgAction::SetTrue, help = "Replace existing binaries if they conflict")]
     pub overwrite: bool,
 
     /// --asset <name>
-    #[arg(long, value_name = "NAME")]
+    #[arg(long, value_name = "NAME", help = "Bypass auto-selection, download exact filename")]
     pub asset: Option<String>,
 
     /// --platform <os/arch>
-    #[arg(long, value_name = "OS/ARCH")]
+    #[arg(long, value_name = "OS/ARCH", help = "Override host platform detection")]
     pub platform: Option<String>,
 
     /// --exclude-keywords
-    #[arg(long, value_name = "K1,K2", value_delimiter = ',')]
+    #[arg(long, value_name = "K1,K2", value_delimiter = ',', help = "Temporarily add keywords to exclusion list")]
     pub exclude_keywords: Option<Vec<String>>,
 
     /// --allow-keyword
-    #[arg(long, action = clap::ArgAction::SetTrue)]
+    #[arg(long, action = clap::ArgAction::SetTrue, help = "Allow keyword-matching assets")]
     pub allow_keyword: bool,
 
     /// --allow-format
-    #[arg(long, value_name = "FMT")]
+    #[arg(long, value_name = "FMT", help = "Temporarily allow normally ignored formats")]
     pub allow_format: Option<String>,
 
     /// -C, --config
@@ -310,7 +319,7 @@ pub struct Cli {
     pub default_forge: ForgeArg,
 
     /// --proxy
-    #[arg(long)]
+    #[arg(long, help = "HTTP proxy URL (overrides config and env)")]
     pub proxy: Option<String>,
 
     /// --verify-signatures
@@ -320,6 +329,22 @@ pub struct Cli {
     /// --no-verify-signatures
     #[arg(long, action = clap::ArgAction::SetTrue)]
     pub no_verify_signatures: bool,
+
+    /// --enable-hooks: allow execution of post_install / pre_remove hooks
+    #[arg(
+        long,
+        action = clap::ArgAction::SetTrue,
+        conflicts_with = "no_enable_hooks"
+    )]
+    pub enable_hooks: bool,
+
+    /// --no-enable-hooks: disable execution of post_install / pre_remove hooks
+    #[arg(
+        long,
+        action = clap::ArgAction::SetTrue,
+        conflicts_with = "enable_hooks"
+    )]
+    pub no_enable_hooks: bool,
 
     /// --registry <url>
     #[arg(long, value_name = "URL")]
@@ -360,6 +385,10 @@ pub struct Cli {
         conflicts_with = "show_parsed_deps"
     )]
     pub no_show_parsed_deps: bool,
+
+    /// -h, --help: Print help (global or operation-scoped)
+    #[arg(short = 'h', long = "help", action = clap::ArgAction::SetTrue)]
+    pub help_flag: bool,
 }
 
 /// Forge argument wrapper for clap integration

@@ -36,6 +36,12 @@ async fn main() -> Result<()> {
     if cli.no_verify_signatures {
         config.security.verify_signatures = false;
     }
+    if cli.enable_hooks {
+        config.security.enable_hooks = true;
+    }
+    if cli.no_enable_hooks {
+        config.security.enable_hooks = false;
+    }
     if let Some(ref registry_url) = cli.registry {
         config.registry.url = registry_url.clone();
     }
@@ -55,11 +61,164 @@ async fn main() -> Result<()> {
     if cli.no_show_parsed_deps {
         config.elf_deps.show_parsed_deps = false;
     }
+    if let Some(ref proxy) = cli.proxy {
+        config.general.proxy = proxy.clone();
+    }
 
     let ctx = commands::CommandContext {
         config: &config,
         cli: &cli,
     };
+
+    // Handle help requests (scoped or global)
+    if cli.help_flag {
+        match cli.operation() {
+            Operation::Sync => {
+                println!("{}", "grel -S, --sync — Fetch & install from forges".bold());
+                println!();
+                println!("Usage: grel -S [OPTIONS] [TARGETS...]");
+                println!();
+                println!("Options:");
+                println!("  -s, --search <PATTERN>   Search forges for packages");
+                println!("  -y, --refresh            Refresh forge metadata and caches");
+                println!("  -u, --sysupgrade         Upgrade all installed packages");
+                println!("  -i, --info <PKG>         Show release metadata before installing");
+                println!("  -c, --clean              Purge downloaded artifacts from cache");
+                println!("      --dry-run            Simulate without writing files");
+                println!("      --noconfirm          Skip interactive prompts");
+                println!("      --overwrite          Replace existing binaries if they conflict");
+                println!("      --asset <NAME>       Download exact asset filename");
+                println!("      --platform <OS/ARCH> Override host platform detection");
+                println!("      --allow-format <FMT> Temporarily allow normally ignored formats");
+                println!("      --asdeps             Install packages as dependencies");
+                println!("      --asexplicit         Install packages as explicitly installed");
+                println!("      --needed             Skip reinstall if already up-to-date");
+                println!("  -w, --download-only      Download without installing");
+                println!();
+                println!("Examples:");
+                println!("  grel -S foo/bar          Install latest release");
+                println!("  grel -Ss ripgrep         Search for ripgrep");
+                println!("  grel -Syu                Refresh + upgrade all");
+            }
+            Operation::Query => {
+                println!("{}", "grel -Q, --query — Inspect local package state".bold());
+                println!();
+                println!("Usage: grel -Q [OPTIONS] [TARGETS...]");
+                println!();
+                println!("Options:");
+                println!("  -l, --list [<PKG>]       List files owned by a package");
+                println!("  -i, --info <PKG>         Show detailed local package info");
+                println!("  -o, --owns <PATH>        Find which package owns a file");
+                println!("  -q, --quiet              Minimal output (names only)");
+                println!("  -e, --explicit           Filter to manually installed packages");
+                println!("  -d, --deps-filter        Filter to dependency-installed packages");
+                println!("  -t, --unrequired         List packages not required by any other");
+                println!("  -k, --check              Verify checksums of installed archives");
+                println!("  -s, --search <PATTERN>   Search locally installed packages");
+                println!();
+                println!("Examples:");
+                println!("  grel -Q                  List all installed packages");
+                println!("  grel -Ql foo/bar         List files for foo/bar");
+                println!("  grel -Qo rg              Which package provides rg?");
+                println!("  grel -Qk                 Verify all checksums");
+            }
+            Operation::Remove => {
+                println!("{}", "grel -R, --remove — Uninstall packages".bold());
+                println!();
+                println!("Usage: grel -R [OPTIONS] [TARGETS...]");
+                println!();
+                println!("Options:");
+                println!("  -c, --clean              Cascade: remove unneeded dependencies");
+                println!("  -n, --nosave             Do not preserve config file backups");
+                println!("  -r, --recursive          Remove packages that depend on the target");
+                println!("  -u, --sysupgrade         Remove packages that are no longer required");
+                println!("      --noconfirm          Skip removal confirmation");
+                println!("      --dry-run            Show what would be removed");
+                println!();
+                println!("Examples:");
+                println!("  grel -R foo/bar          Remove a package");
+                println!("  grel -Rc foo/bar         Cascade removal");
+                println!("  grel -Ru                 Remove all unneeded packages");
+            }
+            Operation::Database => {
+                println!("{}", "grel -D, --database — Local DB & state management".bold());
+                println!();
+                println!("Usage: grel -D [OPTIONS] [TARGETS...]");
+                println!();
+                println!("Options:");
+                println!("      --asexplicit         Mark target(s) as explicitly installed");
+                println!("      --asdeps             Mark target(s) as dependencies");
+                println!("      --migrate <OLD> <NEW>  Update owner/repo path for renamed projects");
+                println!("      --clean              Prune orphaned records and stale caches");
+                println!("      --check              Verify SQLite DB integrity");
+                println!("      --dump               Export state as JSON");
+                println!();
+                println!("Examples:");
+                println!("  grel -D --clean          Clean stale caches and orphans");
+                println!("  grel -D --check          Verify database integrity");
+                println!("  grel -D --asexplicit foo/bar  Mark foo/bar as explicit");
+            }
+            Operation::Upgrade => {
+                println!("{}", "grel -U, --upgrade — Install from a local archive file".bold());
+                println!();
+                println!("Usage: grel -U [OPTIONS] [TARGETS...]");
+                println!();
+                println!("Options:");
+                println!("      --overwrite          Replace existing binaries if they conflict");
+                println!("      --noconfirm          Skip prompts & warnings");
+                println!("      --asset <PATH>       Treat file as direct download");
+                println!();
+                println!("Examples:");
+                println!("  grel -U ./ripgrep.tar.gz      Install from local file");
+                println!("  grel -U ./tool.exe --noconfirm");
+            }
+            Operation::Files => {
+                println!("{}", "grel -F, --files — File index & binary search".bold());
+                println!();
+                println!("Usage: grel -F [OPTIONS] [TARGETS...]");
+                println!();
+                println!("Options:");
+                println!("  -s, --search <PATTERN>   Search installed packages for a filename");
+                println!("  -l, --list <PKG>         List all files extracted by a package");
+                println!("  -y, --refresh            Rebuild file index from installed packages");
+                println!("  -q, --quiet              Output only matching paths");
+                println!();
+                println!("Examples:");
+                println!("  grel -Fs rg              Find which package provides rg");
+                println!("  grel -Fl foo/bar         List all files from foo/bar");
+            }
+            Operation::Help => {
+                println!(
+                    "{}",
+                    "grel - A package manager for pre-built binaries from Git forges".bold()
+                );
+                println!();
+                println!("Usage: grel <OPERATION> [OPTIONS] [TARGETS...]");
+                println!();
+                println!("Operations (first one wins):");
+                println!("  -S, --sync       Fetch & install from forges");
+                println!("  -Q, --query      Inspect local state");
+                println!("  -R, --remove     Uninstall packages");
+                println!("  -D, --database   Local DB & state management");
+                println!("  -U, --upgrade    Install from local file");
+                println!("  -F, --files      File search & index");
+                println!();
+                println!("Common workflows:");
+                println!("  grel -S foo/bar        Install a package");
+                println!("  grel -Ss ripgrep       Search for packages");
+                println!("  grel -Sy               Refresh metadata");
+                println!("  grel -Su               Upgrade installed (cached)");
+                println!("  grel -Syu              Refresh + upgrade");
+                println!("  grel -Ql               List installed files");
+                println!("  grel -Qi foo/bar       Show local package info");
+                println!("  grel -R foo/bar        Remove a package");
+                println!();
+                println!("Use `grel -Sh`, `grel -Qh`, etc. for operation-specific help.");
+                println!("Use `grel --help` for full flag listing.");
+            }
+        }
+        return Ok(());
+    }
 
     // Route by operation (first wins)
     match cli.operation() {
@@ -79,7 +238,9 @@ async fn main() -> Result<()> {
             }
         }
         Operation::Query => {
-            if cli.unrequired || cli.orphans {
+            if cli.unrequired {
+                commands::query::cmd_list_unrequired(&ctx).await?;
+            } else if cli.orphans {
                 commands::query::cmd_list_orphans(&ctx).await?;
             } else if let Some(ref pkg) = cli.info {
                 commands::query::cmd_info_local(&ctx, pkg.clone()).await?;
@@ -111,9 +272,9 @@ async fn main() -> Result<()> {
             }
         }
         Operation::Database => {
-            if cli.db_clean {
+            if cli.db_clean || cli.clean {
                 commands::database::cmd_db_clean(&ctx).await?;
-            } else if cli.db_check {
+            } else if cli.db_check || cli.check {
                 commands::database::cmd_db_check(&ctx).await?;
             } else if cli.db_dump {
                 commands::database::cmd_db_dump(&ctx).await?;
@@ -138,7 +299,10 @@ async fn main() -> Result<()> {
             if let Some(ref pattern) = cli.search {
                 commands::files::cmd_file_search(&ctx, pattern.clone()).await?;
             } else if !cli.list.is_empty() || !cli.targets.is_empty() {
-                let pkg = cli.list.first().or_else(|| cli.targets.first()).unwrap();
+                let Some(pkg) = cli.list.first().or_else(|| cli.targets.first()) else {
+                    eprintln!("Usage: grel -Fl <package>");
+                    return Ok(());
+                };
                 commands::files::cmd_file_list(&ctx, pkg.clone()).await?;
             } else if cli.refresh {
                 commands::files::cmd_reindex(&ctx).await?;

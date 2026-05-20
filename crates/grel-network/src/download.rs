@@ -74,7 +74,7 @@ pub async fn download_parallel(
     pb.set_style(
         indicatif::ProgressStyle::default_bar()
             .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta}) {msg}")
-            .unwrap()
+            .unwrap_or_else(|_| indicatif::ProgressStyle::default_bar())
             .progress_chars("#>-"),
     );
 

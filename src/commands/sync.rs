@@ -135,6 +135,90 @@ async fn resolve_manifest(
     None
 }
 
+/// Check whether a package should be skipped because it is already up-to-date.
+async fn check_needed_skip(
+    db: &grel_cache::Database,
+    forge: &str,
+    owner: &str,
+    repo: &str,
+    target_version: &str,
+) -> Result<bool> {
+    if let Some(existing) = db.get_package(forge, owner, repo).await? {
+        if existing.version == target_version {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Save manifest to the package install directory for later use (e.g., pre_remove hooks).
+pub(crate) fn save_manifest_to_dir(
+    manifest: &grel_core::Manifest,
+    install_dir: &std::path::Path,
+) -> Result<()> {
+    let manifest_path = install_dir.join(".grel.toml");
+    let content = manifest.to_toml().map_err(|e| anyhow::anyhow!("{e}"))?;
+    std::fs::write(&manifest_path, content)
+        .with_context(|| format!("Failed to write manifest to {}", manifest_path.display()))?;
+    Ok(())
+}
+
+/// Run a hook script from the package install directory.
+pub(crate) fn run_hook(hook: &str, install_dir: &std::path::Path, label: &str) {
+    println!("  Running {label} hook...");
+    let status = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(hook)
+        .current_dir(install_dir)
+        .status();
+    match status {
+        Ok(s) if s.success() => println!("  {}", format!("{label} hook completed").green()),
+        Ok(s) => eprintln!(
+            "  {}",
+            format!("{label} hook exited with status {s}").yellow()
+        ),
+        Err(e) => eprintln!(
+            "  {}",
+            format!("Failed to run {label} hook: {e}").yellow()
+        ),
+    }
+}
+
+/// Clean stale archives under a managed package directory.
+/// Returns (removed_count, failed_count).
+pub(crate) fn clean_package_dir(
+    pkg_dir: &std::path::Path,
+    expected_archive: &std::path::Path,
+) -> (usize, usize) {
+    let mut removed = 0;
+    let mut failed = 0;
+
+    let Ok(entries) = std::fs::read_dir(pkg_dir) else {
+        return (removed, failed);
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_file() && path != expected_archive {
+            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            let is_archive = matches!(ext, "gz" | "xz" | "zip" | "bz2" | "zst" | "7z")
+                || name.ends_with(".tar.gz")
+                || name.ends_with(".tar.xz")
+                || name.ends_with(".tar.bz2")
+                || name.ends_with(".tar.zst");
+            if is_archive {
+                match std::fs::remove_file(&path) {
+                    Ok(_) => removed += 1,
+                    Err(_) => failed += 1,
+                }
+            }
+        }
+    }
+
+    (removed, failed)
+}
+
 /// Install a single package (used by cmd_sync and dependency resolution).
 #[allow(clippy::too_many_arguments)]
 async fn install_single_package(
@@ -151,6 +235,9 @@ async fn install_single_package(
     allow_keyword: bool,
     dry_run: bool,
     is_explicit: bool,
+    overwrite: bool,
+    download_only: bool,
+    needed: bool,
 ) -> Result<i64, anyhow::Error> {
     println!("\n{}", format!("→ {}", pkg_ref.to_short_ref()).bold());
 
@@ -268,7 +355,34 @@ async fn install_single_package(
         }
     };
 
-    let is_managed = is_asset_managed(&chosen_asset, &config.assets);
+    let is_managed = if download_only {
+        false
+    } else {
+        is_asset_managed(&chosen_asset, &config.assets)
+    };
+
+    if needed {
+        match check_needed_skip(db, &pkg_ref.forge.to_string(), &pkg_ref.owner, &pkg_ref.repo, &release.tag).await {
+            Ok(true) => {
+                println!(
+                    "  {}",
+                    format!(
+                        "{} {} is up-to-date -- skipping",
+                        pkg_ref.to_short_ref(),
+                        release.tag
+                    )
+                    .dimmed()
+                );
+                return Ok(db
+                    .get_package(&pkg_ref.forge.to_string(), &pkg_ref.owner, &pkg_ref.repo)
+                    .await?
+                    .and_then(|p| p.id)
+                    .unwrap_or(-1));
+            }
+            Err(e) => tracing::warn!("Failed to check needed skip: {e}"),
+            _ => {}
+        }
+    }
 
     let install_dir = if is_managed {
         config.paths.install_root.join(format!(
@@ -312,6 +426,7 @@ async fn install_single_package(
             &install_dir,
             &config.paths.bin_dir,
             &chosen_asset.filename,
+            overwrite,
         ) {
             Ok(result) => {
                 if !result.installed_binaries.is_empty() {
@@ -343,6 +458,18 @@ async fn install_single_package(
         .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
         .collect();
 
+    // Save manifest and run post_install hook
+    if let Some((ref manifest, _)) = manifest {
+        if let Err(e) = save_manifest_to_dir(manifest, &install_dir) {
+            tracing::warn!("Failed to save manifest: {e}");
+        }
+        if !download_only && config.security.enable_hooks {
+            if let Some(ref hook) = manifest.hooks.post_install {
+                run_hook(hook, &install_dir, "post_install");
+            }
+        }
+    }
+
     if is_managed && !config.general.keep_archives && archive_path.exists() {
         std::fs::remove_file(&archive_path).ok();
         println!("  {}", "Cleaned up downloaded archive".dimmed());
@@ -356,7 +483,11 @@ async fn install_single_package(
     pkg.version = release.tag.clone();
     pkg.asset_filename = chosen_asset.filename.clone();
     pkg.checksum = Some(checksum);
-    pkg.install_path = install_dir.to_string_lossy().to_string();
+    pkg.install_path = if is_managed {
+        install_dir.to_string_lossy().to_string()
+    } else {
+        archive_path.to_string_lossy().to_string()
+    };
     pkg.set_binary_list(bin_filenames);
     pkg.is_managed = is_managed;
     pkg.status = models::PackageStatus::Active;
@@ -372,12 +503,158 @@ async fn install_single_package(
         .await?
         .ok_or_else(|| anyhow::anyhow!("Package not found after upsert"))?;
 
-    println!(
-        "  {}",
-        format!("Installed {} v{}", pkg_ref.to_short_ref(), release.tag).green()
-    );
+    // Record extracted files in the package_files index
+    if is_managed {
+        if let Some(pkg_id) = updated_pkg.id {
+            let files = collect_package_files(&install_dir, &config.paths.bin_dir, &archive_path);
+            let file_paths: Vec<String> = files.iter().map(|(p, _)| p.clone()).collect();
+
+            // Conflict detection: check if any files already belong to other packages
+            if let Ok(conflicts) = db.find_conflicting_files(&file_paths).await {
+                let other_conflicts: Vec<_> = conflicts
+                    .into_iter()
+                    .filter(|(pkg, _)| pkg.id != Some(pkg_id))
+                    .collect();
+                if !other_conflicts.is_empty() {
+                    eprintln!(
+                        "  {}",
+                        format!("Warning: {} file(s) conflict with other packages:", other_conflicts.len()).yellow()
+                    );
+                    let mut shown = std::collections::HashSet::new();
+                    for (conflict_pkg, conflict_path) in &other_conflicts {
+                        let key = format!("{} -> {}", conflict_pkg.package_ref(), conflict_path);
+                        if shown.insert(key.clone()) {
+                            eprintln!("    {} owns '{}'", conflict_pkg.package_ref(), conflict_path);
+                        }
+                    }
+                }
+            }
+
+            let file_models: Vec<grel_cache::models::PackageFile> = files
+                .into_iter()
+                .map(|(path, ftype)| grel_cache::models::PackageFile::new(pkg_id, path, ftype))
+                .collect();
+            if let Err(e) = db.set_package_files(pkg_id, &file_models).await {
+                tracing::warn!("Failed to record package files: {e}");
+            }
+        }
+    }
+
+    if download_only {
+        println!(
+            "  {}",
+            format!("Downloaded {} v{}", pkg_ref.to_short_ref(), release.tag).green()
+        );
+    } else {
+        println!(
+            "  {}",
+            format!("Installed {} v{}", pkg_ref.to_short_ref(), release.tag).green()
+        );
+    }
 
     Ok(updated_pkg.id.unwrap_or(-1))
+}
+
+/// Walk the install directory and collect all files with type hints.
+fn collect_package_files(
+    install_dir: &std::path::Path,
+    bin_dir: &std::path::Path,
+    archive_path: &std::path::Path,
+) -> Vec<(String, String)> {
+    let mut files = Vec::new();
+
+    // Collect all files under install_dir
+    fn walk(dir: &std::path::Path, files: &mut Vec<std::path::PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else { return };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, files);
+            } else {
+                files.push(path);
+            }
+        }
+    }
+
+    let mut found = Vec::new();
+    walk(install_dir, &mut found);
+
+    for path in found {
+        let Some(abs_str) = path.to_str() else { continue };
+        let ftype = classify_file_type(&path, bin_dir, archive_path);
+        files.push((abs_str.to_string(), ftype));
+    }
+
+    files
+}
+
+/// Classify a file into a type hint.
+fn classify_file_type(
+    path: &std::path::Path,
+    bin_dir: &std::path::Path,
+    archive_path: &std::path::Path,
+) -> String {
+    if path == archive_path {
+        return "archive".into();
+    }
+
+    // Check if this file is a linked binary (resides in bin_dir)
+    if path.starts_with(bin_dir) {
+        return "binary".into();
+    }
+
+    let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+        return "data".into();
+    };
+    let lower = name.to_lowercase();
+
+    // Config files
+    if lower.ends_with(".toml")
+        || lower.ends_with(".conf")
+        || lower.ends_with(".yaml")
+        || lower.ends_with(".yml")
+        || lower.ends_with(".json")
+        || lower.ends_with(".ini")
+        || lower.ends_with(".cfg")
+    {
+        return "config".into();
+    }
+
+    // Documentation
+    const DOC_NAMES: &[&str] = &[
+        "readme", "license", "unlicense", "copying", "changelog", "changes", "notice",
+        "authors", "contributors", "credits",
+    ];
+    let stem = std::path::Path::new(&lower)
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default();
+    if DOC_NAMES.contains(&stem.as_str()) || lower.ends_with(".md") || lower.ends_with(".txt") {
+        return "doc".into();
+    }
+
+    // Executable binaries (inside extracted tree)
+    if lower.ends_with(".exe")
+        || lower.ends_with(".bat")
+        || lower.ends_with(".cmd")
+        || lower.ends_with(".ps1")
+        || lower.ends_with(".com")
+        || lower.ends_with(".bin")
+    {
+        return "binary".into();
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(meta) = std::fs::metadata(path) {
+            if meta.permissions().mode() & 0o111 != 0 {
+                return "binary".into();
+            }
+        }
+    }
+
+    "data".into()
 }
 
 /// Present the resolved asset selection to the user, show alternatives,
@@ -540,10 +817,15 @@ pub async fn cmd_sync(ctx: &CommandContext<'_>, packages: &[String]) -> Result<(
         exclude_keywords.extend(extra.clone());
     }
 
+    let mut ignore_formats = ctx.config.assets.ignore_formats.clone();
+    if let Some(ref allowed) = ctx.cli.allow_format {
+        ignore_formats.retain(|f| f != allowed);
+    }
+
     let resolver_config = ResolverConfig {
         default_selection_policy: selection_policy,
         exclude_keywords,
-        ignore_formats: ctx.config.assets.ignore_formats.clone(),
+        ignore_formats,
         prefer_formats: ctx.config.assets.prefer_formats.clone(),
         prefer_32bit_on_64bit: ctx.config.assets.prefer_32bit_on_64bit,
         fallback_to_32bit: ctx.config.assets.fallback_to_32bit,
@@ -734,7 +1016,53 @@ pub async fn cmd_sync(ctx: &CommandContext<'_>, packages: &[String]) -> Result<(
             }
         };
 
-        let is_managed = is_asset_managed(&chosen_asset, &ctx.config.assets);
+        // Signature verification enforcement
+        if ctx.config.security.verify_signatures {
+            let sig_name = format!("{}.sig", chosen_asset.filename);
+            let asc_name = format!("{}.asc", chosen_asset.filename);
+            let has_sig = release.assets.iter().any(|a| a.filename == sig_name || a.filename == asc_name);
+            if !has_sig {
+                eprintln!(
+                    "  {}",
+                    format!(
+                        "Signature verification enabled but no signature file found for {}. Skipping.",
+                        chosen_asset.filename
+                    )
+                    .red()
+                );
+                continue;
+            }
+            println!(
+                "  {}",
+                format!("Signature file found for {}", chosen_asset.filename).dimmed()
+            );
+        }
+
+        let is_managed = if ctx.cli.download_only {
+            false
+        } else {
+            is_asset_managed(&chosen_asset, &ctx.config.assets)
+        };
+
+        // --needed: skip if already installed at this version
+        if ctx.cli.needed {
+            match check_needed_skip(&db, &pkg_ref.forge.to_string(), &pkg_ref.owner, &pkg_ref.repo, &release.tag).await {
+                Ok(true) => {
+                    println!(
+                        "  {}",
+                        format!(
+                            "{} {} is up-to-date -- skipping",
+                            pkg_ref.to_short_ref(),
+                            release.tag
+                        )
+                        .dimmed()
+                    );
+                    continue;
+                }
+                Err(e) => tracing::warn!("Failed to check needed skip: {e}"),
+                _ => {}
+            }
+        }
 
         let install_dir = if is_managed {
             ctx.config.paths.install_root.join(format!(
@@ -778,6 +1106,7 @@ pub async fn cmd_sync(ctx: &CommandContext<'_>, packages: &[String]) -> Result<(
                 &install_dir,
                 &ctx.config.paths.bin_dir,
                 &chosen_asset.filename,
+                ctx.cli.overwrite,
             ) {
                 Ok(result) => {
                     if !result.installed_binaries.is_empty() {
@@ -809,7 +1138,21 @@ pub async fn cmd_sync(ctx: &CommandContext<'_>, packages: &[String]) -> Result<(
             .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
             .collect();
 
-        check_elf_deps(&installed_binaries, ctx, &db).await;
+        // Save manifest and run post_install hook
+        if let Some((ref manifest, _)) = manifest {
+            if let Err(e) = save_manifest_to_dir(manifest, &install_dir) {
+                tracing::warn!("Failed to save manifest: {e}");
+            }
+            if !ctx.cli.download_only && ctx.config.security.enable_hooks {
+                if let Some(ref hook) = manifest.hooks.post_install {
+                    run_hook(hook, &install_dir, "post_install");
+                }
+            }
+        }
+
+        if !ctx.cli.download_only {
+            check_elf_deps(&installed_binaries, ctx, &db).await;
+        }
 
         if is_managed && !ctx.config.general.keep_archives && archive_path.exists() {
             std::fs::remove_file(&archive_path).ok();
@@ -824,7 +1167,11 @@ pub async fn cmd_sync(ctx: &CommandContext<'_>, packages: &[String]) -> Result<(
         pkg.version = release.tag.clone();
         pkg.asset_filename = chosen_asset.filename.clone();
         pkg.checksum = Some(checksum);
-        pkg.install_path = install_dir.to_string_lossy().to_string();
+        pkg.install_path = if is_managed {
+            install_dir.to_string_lossy().to_string()
+        } else {
+            archive_path.to_string_lossy().to_string()
+        };
         pkg.set_binary_list(bin_filenames);
         pkg.is_managed = is_managed;
         pkg.status = models::PackageStatus::Active;
@@ -867,6 +1214,9 @@ pub async fn cmd_sync(ctx: &CommandContext<'_>, packages: &[String]) -> Result<(
                         allow_keyword,
                         ctx.cli.dry_run,
                         false,
+                        ctx.cli.overwrite,
+                        ctx.cli.download_only,
+                        ctx.cli.needed,
                     )
                     .await
                     {
@@ -916,10 +1266,17 @@ pub async fn cmd_sync(ctx: &CommandContext<'_>, packages: &[String]) -> Result<(
             }
         }
 
-        println!(
-            "  {}",
-            format!("Installed {} v{}", pkg_ref.to_short_ref(), release.tag).green()
-        );
+        if ctx.cli.download_only {
+            println!(
+                "  {}",
+                format!("Downloaded {} v{}", pkg_ref.to_short_ref(), release.tag).green()
+            );
+        } else {
+            println!(
+                "  {}",
+                format!("Installed {} v{}", pkg_ref.to_short_ref(), release.tag).green()
+            );
+        }
     }
 
     db.close().await;
@@ -1104,19 +1461,35 @@ pub async fn cmd_sync_refresh(ctx: &CommandContext<'_>) -> Result<()> {
 
 /// Clean artifact cache
 pub async fn cmd_clean_cache(ctx: &CommandContext<'_>) -> Result<()> {
-    println!("{}", "Cleaning download cache...".bold());
+    println!("{}", "Cleaning artifact cache...".bold());
 
     let db = ctx.db().await?;
     let packages = db.list_packages().await?;
-    let active_paths: std::collections::HashSet<String> = packages
-        .iter()
+    let active_packages: Vec<_> = packages
+        .into_iter()
         .filter(|p| matches!(p.status, models::PackageStatus::Active))
-        .map(|p| p.install_path.clone())
         .collect();
 
-    let download_dir = &ctx.config.paths.download_dir;
+    // Build set of valid archive paths for active managed packages
+    // Build set of valid archive paths for active managed packages
+    let _valid_archives: std::collections::HashSet<std::path::PathBuf> = active_packages
+        .iter()
+        .filter(|p| p.is_managed)
+        .map(|p| {
+            std::path::PathBuf::from(&p.install_path).join(&p.asset_filename)
+        })
+        .collect();
+
     let mut removed = 0;
     let mut failed = 0;
+
+    // Clean download_dir
+    let download_dir = &ctx.config.paths.download_dir;
+    let active_download_paths: std::collections::HashSet<String> = active_packages
+        .iter()
+        .filter(|p| !p.is_managed)
+        .map(|p| p.install_path.clone())
+        .collect();
 
     if download_dir.exists() {
         for entry in std::fs::read_dir(download_dir)? {
@@ -1124,7 +1497,7 @@ pub async fn cmd_clean_cache(ctx: &CommandContext<'_>) -> Result<()> {
             let path = entry.path();
             let path_str = path.to_string_lossy().to_string();
 
-            if !active_paths.contains(&path_str) {
+            if !active_download_paths.contains(&path_str) {
                 if path.is_file() {
                     match std::fs::remove_file(&path) {
                         Ok(_) => removed += 1,
@@ -1133,6 +1506,21 @@ pub async fn cmd_clean_cache(ctx: &CommandContext<'_>) -> Result<()> {
                 }
             }
         }
+    }
+
+    // Clean old archives under install_root for managed packages
+    for pkg in &active_packages {
+        if !pkg.is_managed {
+            continue;
+        }
+        let pkg_dir = std::path::PathBuf::from(&pkg.install_path);
+        if !pkg_dir.exists() || !pkg_dir.is_dir() {
+            continue;
+        }
+        let expected_archive = pkg_dir.join(&pkg.asset_filename);
+        let (r, f) = clean_package_dir(&pkg_dir, &expected_archive);
+        removed += r;
+        failed += f;
     }
 
     println!("  Removed {removed} orphaned archive(s)");
@@ -1255,7 +1643,16 @@ pub async fn cmd_upgrade(ctx: &CommandContext<'_>) -> Result<()> {
                 continue;
             }
             grel_core::SelectionResult::MultipleAssets(assets) => {
-                assets.into_iter().next().unwrap()
+                match assets.into_iter().next() {
+                    Some(a) => a,
+                    None => {
+                        errors.push((
+                            pkg_ref_str.clone(),
+                            "Asset selection returned empty list".into(),
+                        ));
+                        continue;
+                    }
+                }
             }
         };
 
@@ -1365,6 +1762,7 @@ pub async fn cmd_upgrade(ctx: &CommandContext<'_>) -> Result<()> {
             ctx.config,
             *forge,
             *is_managed,
+            ctx.cli.overwrite,
         )
         .await
         {
@@ -1410,6 +1808,7 @@ async fn upgrade_single_package(
     config: &Config,
     _forge: Forge,
     is_managed: bool,
+    overwrite: bool,
 ) -> Result<Vec<std::path::PathBuf>> {
     let install_dir = if is_managed {
         config
@@ -1445,7 +1844,11 @@ async fn upgrade_single_package(
     updated_pkg.asset_filename = asset.filename.clone();
     updated_pkg.checksum = Some(checksum.clone());
     updated_pkg.is_managed = is_managed;
-    updated_pkg.install_path = install_dir.to_string_lossy().to_string();
+    updated_pkg.install_path = if is_managed {
+        install_dir.to_string_lossy().to_string()
+    } else {
+        archive_path.to_string_lossy().to_string()
+    };
     updated_pkg.last_checked = Some(chrono::Utc::now().timestamp());
     updated_pkg.status = models::PackageStatus::Active;
 
@@ -1463,6 +1866,7 @@ async fn upgrade_single_package(
             &install_dir,
             &config.paths.bin_dir,
             &asset.filename,
+            overwrite,
         ) {
             Ok(result) => {
                 let bin_filenames: Vec<String> = result
@@ -1525,4 +1929,205 @@ async fn upgrade_single_package(
         .with_context(|| "Failed to update package record")?;
 
     Ok(installed_bins)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use grel_cache::{Database, models::InstalledPackage};
+
+    fn make_temp_dir(label: &str) -> std::path::PathBuf {
+        let tmp = std::env::temp_dir().join(format!("grel-sync-test-{label}-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        tmp
+    }
+
+    fn cleanup(tmp: &std::path::Path) {
+        let _ = std::fs::remove_dir_all(tmp);
+    }
+
+    // -----------------------------------------------------------------------
+    // check_needed_skip
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn check_needed_skip_returns_true_when_version_matches() {
+        let tmp = make_temp_dir("needed-skip-true");
+        let db = Database::init(&tmp.join("test.sqlite")).await.expect("init db");
+
+        let mut pkg = InstalledPackage::new("github".into(), "owner".into(), "repo".into());
+        pkg.version = "1.2.3".into();
+        pkg.is_managed = true;
+        db.upsert_package(&pkg).await.expect("upsert");
+
+        let should_skip = check_needed_skip(&db, "github", "owner", "repo", "1.2.3")
+            .await
+            .expect("check_needed_skip");
+
+        assert!(should_skip, "expected skip when version matches");
+
+        db.close().await;
+        cleanup(&tmp);
+    }
+
+    #[tokio::test]
+    async fn check_needed_skip_returns_false_when_version_differs() {
+        let tmp = make_temp_dir("needed-skip-false");
+        let db = Database::init(&tmp.join("test.sqlite")).await.expect("init db");
+
+        let mut pkg = InstalledPackage::new("github".into(), "owner".into(), "repo".into());
+        pkg.version = "1.2.3".into();
+        pkg.is_managed = true;
+        db.upsert_package(&pkg).await.expect("upsert");
+
+        let should_skip = check_needed_skip(&db, "github", "owner", "repo", "2.0.0")
+            .await
+            .expect("check_needed_skip");
+
+        assert!(!should_skip, "expected no skip when version differs");
+
+        db.close().await;
+        cleanup(&tmp);
+    }
+
+    #[tokio::test]
+    async fn check_needed_skip_returns_false_when_package_missing() {
+        let tmp = make_temp_dir("needed-skip-missing");
+        let db = Database::init(&tmp.join("test.sqlite")).await.expect("init db");
+
+        let should_skip = check_needed_skip(&db, "github", "owner", "repo", "1.0.0")
+            .await
+            .expect("check_needed_skip");
+
+        assert!(!should_skip, "expected no skip when package not installed");
+
+        db.close().await;
+        cleanup(&tmp);
+    }
+
+    // -----------------------------------------------------------------------
+    // clean_package_dir
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn clean_package_dir_removes_stale_archives() {
+        let tmp = make_temp_dir("clean-dir");
+        let pkg_dir = tmp.join("pkg");
+        std::fs::create_dir_all(&pkg_dir).unwrap();
+
+        let current = pkg_dir.join("tool-v2.tar.gz");
+        let stale1 = pkg_dir.join("tool-v1.tar.gz");
+        let stale2 = pkg_dir.join("tool-v1.zip");
+        let other = pkg_dir.join("README.md");
+
+        std::fs::File::create(&current).unwrap();
+        std::fs::File::create(&stale1).unwrap();
+        std::fs::File::create(&stale2).unwrap();
+        std::fs::File::create(&other).unwrap();
+
+        let (removed, failed) = clean_package_dir(&pkg_dir, &current);
+
+        assert_eq!(removed, 2, "expected 2 stale archives removed");
+        assert_eq!(failed, 0, "expected 0 failures");
+        assert!(current.exists(), "current archive should be kept");
+        assert!(!stale1.exists(), "stale archive 1 should be removed");
+        assert!(!stale2.exists(), "stale archive 2 should be removed");
+        assert!(other.exists(), "non-archive file should be kept");
+
+        cleanup(&tmp);
+    }
+
+    #[test]
+    fn clean_package_dir_keeps_only_expected_archive() {
+        let tmp = make_temp_dir("clean-keep");
+        let pkg_dir = tmp.join("pkg");
+        std::fs::create_dir_all(&pkg_dir).unwrap();
+
+        let expected = pkg_dir.join("expected.tar.xz");
+        std::fs::File::create(&expected).unwrap();
+
+        let (removed, failed) = clean_package_dir(&pkg_dir, &expected);
+
+        assert_eq!(removed, 0);
+        assert_eq!(failed, 0);
+        assert!(expected.exists());
+
+        cleanup(&tmp);
+    }
+
+    // -----------------------------------------------------------------------
+    // save_manifest_to_dir
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn save_manifest_to_dir_writes_toml() {
+        let tmp = make_temp_dir("save-manifest");
+        let manifest = grel_core::Manifest {
+            name: "test-pkg".into(),
+            description: "A test package".into(),
+            license: "MIT".into(),
+            source: Default::default(),
+            assets: Default::default(),
+            checksum_filename: Default::default(),
+            signature_filename: Default::default(),
+            signature_kind: Default::default(),
+            dependencies: Default::default(),
+            hooks: Default::default(),
+        };
+
+        save_manifest_to_dir(&manifest, &tmp).expect("save_manifest_to_dir");
+
+        let manifest_path = tmp.join(".grel.toml");
+        assert!(manifest_path.exists(), "manifest file should be created");
+
+        let content = std::fs::read_to_string(&manifest_path).unwrap();
+        assert!(content.contains("test-pkg"), "manifest should contain package name");
+        assert!(content.contains("MIT"), "manifest should contain license");
+
+        cleanup(&tmp);
+    }
+
+    // -----------------------------------------------------------------------
+    // run_hook
+    // -----------------------------------------------------------------------
+
+    #[test]
+    #[cfg(unix)]
+    fn run_hook_executes_successfully() {
+        let tmp = make_temp_dir("run-hook");
+        let marker = tmp.join("hook_ran");
+
+        run_hook(
+            &format!("touch {}", marker.display()),
+            &tmp,
+            "post_install",
+        );
+
+        assert!(marker.exists(), "hook should have created marker file");
+
+        cleanup(&tmp);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn run_hook_handles_failure_gracefully() {
+        let tmp = make_temp_dir("run-hook-fail");
+
+        // This should not panic
+        run_hook("exit 1", &tmp, "pre_remove");
+
+        cleanup(&tmp);
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn run_hook_graceful_on_windows() {
+        let tmp = make_temp_dir("run-hook-win");
+
+        // run_hook uses 'sh' which is not available on Windows;
+        // it should print a warning but not panic.
+        run_hook("echo hello", &tmp, "post_install");
+
+        cleanup(&tmp);
+    }
 }

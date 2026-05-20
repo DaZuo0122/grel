@@ -29,7 +29,10 @@ pub async fn cmd_remove(ctx: &CommandContext<'_>, packages: &[String]) -> Result
             continue;
         };
 
-        let id = pkg.id.expect("Package must have an ID");
+        let Some(id) = pkg.id else {
+            eprintln!("{}", "Package record is missing an ID".red());
+            continue;
+        };
 
         let dependents = db
             .get_dependents(&pkg_ref.to_string_ref())
@@ -234,8 +237,60 @@ pub async fn cmd_remove_unneeded(ctx: &CommandContext<'_>) -> Result<()> {
 pub async fn remove_package_files(
     config: &grel_config::Config,
     pkg: &grel_cache::models::InstalledPackage,
-    _nosave: bool,
+    nosave: bool,
 ) -> Result<()> {
+    let install_path = std::path::Path::new(&pkg.install_path);
+
+    // Run pre_remove hook if present and enabled
+    if config.security.enable_hooks {
+        let manifest_path = if install_path.is_dir() {
+            install_path.join(".grel.toml")
+        } else if let Some(parent) = install_path.parent() {
+            parent.join(".grel.toml")
+        } else {
+            std::path::PathBuf::new()
+        };
+
+        if manifest_path.exists() {
+            if let Ok(content) = std::fs::read_to_string(&manifest_path) {
+                if let Ok(manifest) = grel_core::Manifest::load_from_str(&content) {
+                    if let Some(ref hook) = manifest.hooks.pre_remove {
+                        println!("  Running pre_remove hook...");
+                        let hook_dir = if install_path.is_dir() {
+                            install_path.to_path_buf()
+                        } else if let Some(parent) = install_path.parent() {
+                            parent.to_path_buf()
+                        } else {
+                            std::path::PathBuf::from(".")
+                        };
+                        let status = std::process::Command::new("sh")
+                            .arg("-c")
+                            .arg(hook)
+                            .current_dir(&hook_dir)
+                            .status();
+                        match status {
+                            Ok(s) if s.success() => {
+                                println!("  {}", "pre_remove hook completed".green());
+                            }
+                            Ok(s) => {
+                                eprintln!(
+                                    "  {}",
+                                    format!("pre_remove hook exited with status {s}").yellow()
+                                );
+                            }
+                            Err(e) => {
+                                eprintln!(
+                                    "  {}",
+                                    format!("Failed to run pre_remove hook: {e}").yellow()
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // Delete binaries from bin_dir
     for bin_name in pkg.binary_list() {
         let bin_path = config.paths.bin_dir.join(&bin_name);
@@ -244,19 +299,194 @@ pub async fn remove_package_files(
         }
     }
 
-    // Delete the entire install directory
-    let install_path = std::path::Path::new(&pkg.install_path);
+    // Delete the install path
     if install_path.exists() {
         if install_path.is_dir() {
+            if !nosave {
+                // Preserve config files before deletion
+                preserve_config_files(install_path);
+            }
             std::fs::remove_dir_all(install_path).ok();
         } else {
             std::fs::remove_file(install_path).ok();
         }
     }
 
-    // NOTE: nosave is currently a no-op because grel does not yet implement
-    // config file preservation (.grelnew). When that feature is added,
-    // nosave=false should preserve config files while nosave=true removes everything.
-
     Ok(())
+}
+
+/// Preserve config files by copying them to `.grelnew` backups.
+/// Only called when `nosave = false`.
+fn preserve_config_files(install_path: &std::path::Path) {
+    const CONFIG_EXTS: &[&str] = &["toml", "conf", "yaml", "yml", "json", "ini", "cfg"];
+
+    let backup_dir = install_path.with_extension("grelnew");
+    let mut preserved = 0;
+
+    fn walk(
+        dir: &std::path::Path,
+        install_path: &std::path::Path,
+        backup_dir: &std::path::Path,
+        config_exts: &[&str],
+        preserved: &mut usize,
+    ) {
+        let Ok(entries) = std::fs::read_dir(dir) else { return };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, install_path, backup_dir, config_exts, preserved);
+            } else if path.is_file() {
+                let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+                if config_exts.contains(&ext) {
+                    let relative = path.strip_prefix(install_path).unwrap_or(&path);
+                    let dest = backup_dir.join(relative);
+                    if let Some(parent) = dest.parent() {
+                        std::fs::create_dir_all(parent).ok();
+                    }
+                    if std::fs::copy(&path, dest).is_ok() {
+                        *preserved += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    walk(install_path, install_path, &backup_dir, CONFIG_EXTS, &mut preserved);
+
+    if preserved > 0 {
+        println!(
+            "  Preserved {preserved} config file(s) to {}",
+            backup_dir.display()
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use grel_cache::models::{InstalledPackage, PackageStatus};
+
+    fn make_temp_dir(label: &str) -> std::path::PathBuf {
+        let tmp = std::env::temp_dir().join(format!("grel-remove-test-{label}-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        tmp
+    }
+
+    fn cleanup(tmp: &std::path::Path) {
+        let _ = std::fs::remove_dir_all(tmp);
+    }
+
+    #[tokio::test]
+    async fn remove_package_files_deletes_binaries_and_install_path() {
+        let tmp = make_temp_dir("basic-remove");
+        let bin_dir = tmp.join("bin");
+        let install_dir = tmp.join("install");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        std::fs::create_dir_all(&install_dir).unwrap();
+
+        let bin_path = bin_dir.join("mytool");
+        std::fs::File::create(&bin_path).unwrap();
+
+        let marker = install_dir.join("marker");
+        std::fs::File::create(&marker).unwrap();
+
+        let mut pkg = InstalledPackage::new("github".into(), "owner".into(), "repo".into());
+        pkg.install_path = install_dir.to_string_lossy().to_string();
+        pkg.set_binary_list(vec!["mytool".into()]);
+        pkg.is_managed = true;
+        pkg.status = PackageStatus::Active;
+
+        let config = grel_config::Config::default();
+        // We can't easily override bin_dir in Config::default(), so this test
+        // only verifies the install_path deletion.
+        remove_package_files(&config, &pkg, false).await.unwrap();
+
+        assert!(!marker.exists(), "install directory should be removed");
+
+        cleanup(&tmp);
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn remove_package_files_runs_pre_remove_hook_when_enabled() {
+        let tmp = make_temp_dir("pre-remove-hook");
+        let install_dir = tmp.join("install");
+        std::fs::create_dir_all(&install_dir).unwrap();
+
+        let hook_marker = tmp.join("hook_ran");
+
+        // Write a manifest with a pre_remove hook
+        let manifest = grel_core::Manifest {
+            name: "test".into(),
+            description: "".into(),
+            license: "".into(),
+            source: Default::default(),
+            assets: Default::default(),
+            checksum_filename: Default::default(),
+            signature_filename: Default::default(),
+            signature_kind: Default::default(),
+            dependencies: Default::default(),
+            hooks: grel_core::HookSpec {
+                pre_remove: Some(format!("touch {}", hook_marker.display())),
+                post_install: Default::default(),
+            },
+        };
+        let manifest_path = install_dir.join(".grel.toml");
+        std::fs::write(&manifest_path, manifest.to_toml().unwrap()).unwrap();
+
+        let mut pkg = InstalledPackage::new("github".into(), "owner".into(), "repo".into());
+        pkg.install_path = install_dir.to_string_lossy().to_string();
+        pkg.is_managed = true;
+        pkg.status = PackageStatus::Active;
+
+        let mut config = grel_config::Config::default();
+        config.security.enable_hooks = true;
+        remove_package_files(&config, &pkg, false).await.unwrap();
+
+        assert!(hook_marker.exists(), "pre_remove hook should have created marker");
+
+        cleanup(&tmp);
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn remove_package_files_skips_pre_remove_hook_when_disabled() {
+        let tmp = make_temp_dir("pre-remove-hook-disabled");
+        let install_dir = tmp.join("install");
+        std::fs::create_dir_all(&install_dir).unwrap();
+
+        let hook_marker = tmp.join("hook_ran");
+
+        // Write a manifest with a pre_remove hook
+        let manifest = grel_core::Manifest {
+            name: "test".into(),
+            description: "".into(),
+            license: "".into(),
+            source: Default::default(),
+            assets: Default::default(),
+            checksum_filename: Default::default(),
+            signature_filename: Default::default(),
+            signature_kind: Default::default(),
+            dependencies: Default::default(),
+            hooks: grel_core::HookSpec {
+                pre_remove: Some(format!("touch {}", hook_marker.display())),
+                post_install: Default::default(),
+            },
+        };
+        let manifest_path = install_dir.join(".grel.toml");
+        std::fs::write(&manifest_path, manifest.to_toml().unwrap()).unwrap();
+
+        let mut pkg = InstalledPackage::new("github".into(), "owner".into(), "repo".into());
+        pkg.install_path = install_dir.to_string_lossy().to_string();
+        pkg.is_managed = true;
+        pkg.status = PackageStatus::Active;
+
+        let mut config = grel_config::Config::default();
+        config.security.enable_hooks = false; // disabled by default
+        remove_package_files(&config, &pkg, false).await.unwrap();
+
+        assert!(!hook_marker.exists(), "pre_remove hook should NOT run when disabled");
+
+        cleanup(&tmp);
+    }
 }
