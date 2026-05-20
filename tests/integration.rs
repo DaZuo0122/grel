@@ -13,7 +13,7 @@ use grel_core::{
 use grel_network::{build_http_client, download};
 use grel_providers::ProviderRegistry;
 
-fn make_client() -> reqwest::Client {
+fn make_client() -> grel_network::Client {
     build_http_client(&GeneralConfig::default()).expect("failed to build HTTP client")
 }
 
@@ -205,13 +205,13 @@ async fn download_small_file_succeeds() {
     let tmp_dir = std::env::temp_dir().join("grel-test-download");
     let dest = tmp_dir.join("test.txt");
 
-    let result = download::download_file(&client, "https://httpbin.org/get", &dest, None).await;
-
+    let result = download::download_file(&client, "https://httpbin.org/get", &dest, None, false, None).await;
     assert!(
         result.is_ok(),
         "download should succeed: {:?}",
         result.err()
     );
+    let _checksum = result.unwrap().0;
     assert!(dest.exists(), "destination file should exist");
 
     let _ = std::fs::remove_file(&dest);
