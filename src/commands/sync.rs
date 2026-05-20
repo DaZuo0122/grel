@@ -415,10 +415,18 @@ async fn install_single_package(
         format_size(chosen_asset.size_bytes.unwrap_or(0))
     );
 
-    let checksum =
-        grel_network::download::download_file(client, &chosen_asset.url, &archive_path, None)
+    // Check for cached ETag
+    let cached_etag = db.get_etag(&chosen_asset.url).await.ok().flatten();
+
+    let (checksum, response_etag) =
+        grel_network::download::download_file(client, &chosen_asset.url, &archive_path, None, true, cached_etag.as_deref())
             .await
             .with_context(|| format!("Failed to download {}", chosen_asset.filename))?;
+
+    // Store ETag for future conditional requests
+    if let Some(etag) = response_etag {
+        db.store_etag(&chosen_asset.url, &etag).await.ok();
+    }
 
     let installed_binaries = if is_managed {
         match grel_network::archive::install_asset(
@@ -1095,10 +1103,18 @@ pub async fn cmd_sync(ctx: &CommandContext<'_>, packages: &[String]) -> Result<(
             format_size(chosen_asset.size_bytes.unwrap_or(0))
         );
 
-        let checksum =
-            grel_network::download::download_file(&client, &chosen_asset.url, &archive_path, None)
+        // Check for cached ETag
+        let cached_etag = db.get_etag(&chosen_asset.url).await.ok().flatten();
+
+        let (checksum, response_etag) =
+            grel_network::download::download_file(&client, &chosen_asset.url, &archive_path, None, true, cached_etag.as_deref())
                 .await
                 .with_context(|| format!("Failed to download {}", chosen_asset.filename))?;
+
+        // Store ETag for future conditional requests
+        if let Some(etag) = response_etag {
+            db.store_etag(&chosen_asset.url, &etag).await.ok();
+        }
 
         let installed_binaries = if is_managed {
             match grel_network::archive::install_asset(
@@ -1832,9 +1848,17 @@ async fn upgrade_single_package(
         .map_err(|e| anyhow::anyhow!("Failed to create directory: {e}"))?;
 
     let temp_path = archive_path.with_extension("part");
-    let checksum = grel_network::download::download_file(client, &asset.url, &temp_path, None)
+    // Check for cached ETag
+    let cached_etag = db.get_etag(&asset.url).await.ok().flatten();
+
+    let (checksum, response_etag) = grel_network::download::download_file(client, &asset.url, &temp_path, None, true, cached_etag.as_deref())
         .await
         .with_context(|| format!("Failed to download {}", asset.filename))?;
+
+    // Store ETag for future conditional requests
+    if let Some(etag) = response_etag {
+        db.store_etag(&asset.url, &etag).await.ok();
+    }
 
     std::fs::rename(&temp_path, &archive_path)
         .map_err(|e| anyhow::anyhow!("Failed to rename downloaded file: {e}"))?;

@@ -79,7 +79,10 @@ pub enum ProviderError {
     NotFound(String),
 
     #[error("HTTP error: {0}")]
-    HttpError(#[from] reqwest::Error),
+    HttpError(#[from] reqwest_middleware::Error),
+
+    #[error("Reqwest error: {0}")]
+    ReqwestError(#[from] reqwest::Error),
 
     #[error("API rate limit exceeded")]
     RateLimitExceeded,

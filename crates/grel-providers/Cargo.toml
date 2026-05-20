@@ -12,6 +12,7 @@ grel-config = { path = "../grel-config" }
 
 async-trait.workspace = true
 reqwest.workspace = true
+reqwest-middleware.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 tracing.workspace = true

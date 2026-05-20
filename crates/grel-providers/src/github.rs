@@ -1,19 +1,19 @@
 //! GitHub API implementation.
 
 use async_trait::async_trait;
-use reqwest::Client;
+use reqwest_middleware::ClientWithMiddleware;
 use serde::Deserialize;
 
 use crate::trait_def::{ProviderError, ProviderType, Release, ReleaseProvider, SearchResult};
 
 /// GitHub provider
 pub struct GitHubProvider {
-    client: Client,
+    client: ClientWithMiddleware,
     token: Option<String>,
 }
 
 impl GitHubProvider {
-    pub fn new(client: Client, token: Option<String>) -> Self {
+    pub fn new(client: ClientWithMiddleware, token: Option<String>) -> Self {
         Self { client, token }
     }
 
@@ -21,7 +21,7 @@ impl GitHubProvider {
         format!("https://api.github.com{path}")
     }
 
-    fn add_auth_header(&self, builder: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+    fn add_auth_header(&self, builder: reqwest_middleware::RequestBuilder) -> reqwest_middleware::RequestBuilder {
         if let Some(token) = &self.token {
             builder.header("Authorization", format!("Bearer {token}"))
         } else {
