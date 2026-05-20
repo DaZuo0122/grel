@@ -76,6 +76,26 @@ pub struct GeneralConfig {
     /// Keep downloaded archives after extraction (default: true)
     #[serde(default = "default_keep_archives")]
     pub keep_archives: bool,
+
+    /// Max retries for transient download failures (default: 3)
+    #[serde(default = "default_max_retries")]
+    pub max_retries: u32,
+
+    /// Base delay between retries in milliseconds (default: 1000)
+    #[serde(default = "default_retry_delay_ms")]
+    pub retry_delay_ms: u64,
+
+    /// Overall request timeout in seconds (default: 300)
+    #[serde(default = "default_timeout_secs")]
+    pub timeout_secs: u64,
+
+    /// TCP connect timeout in seconds (default: 30)
+    #[serde(default = "default_connect_timeout_secs")]
+    pub connect_timeout_secs: u64,
+
+    /// Max idle connections per host in the HTTP pool (default: 10)
+    #[serde(default = "default_pool_max_idle")]
+    pub pool_max_idle: usize,
 }
 
 impl Default for GeneralConfig {
@@ -85,6 +105,11 @@ impl Default for GeneralConfig {
             max_concurrent: default_max_concurrent(),
             proxy: String::new(),
             keep_archives: default_keep_archives(),
+            max_retries: default_max_retries(),
+            retry_delay_ms: default_retry_delay_ms(),
+            timeout_secs: default_timeout_secs(),
+            connect_timeout_secs: default_connect_timeout_secs(),
+            pool_max_idle: default_pool_max_idle(),
         }
     }
 }
@@ -99,6 +124,26 @@ fn default_max_concurrent() -> usize {
 
 fn default_keep_archives() -> bool {
     true
+}
+
+fn default_max_retries() -> u32 {
+    3
+}
+
+fn default_retry_delay_ms() -> u64 {
+    1000
+}
+
+fn default_timeout_secs() -> u64 {
+    300
+}
+
+fn default_connect_timeout_secs() -> u64 {
+    30
+}
+
+fn default_pool_max_idle() -> usize {
+    10
 }
 
 /// Asset resolution settings
