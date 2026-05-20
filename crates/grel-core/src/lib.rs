@@ -6,6 +6,7 @@
 //! - Deterministic filter/sort pipeline
 
 mod asset;
+mod checksum;
 mod dependency;
 mod manifest;
 mod package_ref;
@@ -14,6 +15,7 @@ mod registry;
 mod resolver;
 
 pub use asset::*;
+pub use checksum::*;
 pub use dependency::*;
 pub use manifest::*;
 pub use package_ref::*;

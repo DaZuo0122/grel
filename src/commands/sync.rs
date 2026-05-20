@@ -6,7 +6,7 @@ use anyhow::{Context, Result};
 use grel_cache::{Database, models};
 use grel_config::Config;
 use grel_core::Forge;
-use grel_core::{Arch, Os, PackageRef, RemoteAsset, ResolverConfig};
+use grel_core::{Arch, ChecksumVerifier, Manifest, Os, PackageRef, RemoteAsset, ResolverConfig};
 use grel_network::{Client, build_http_client};
 use grel_providers::ProviderRegistry;
 use owo_colors::OwoColorize;
@@ -182,6 +182,93 @@ pub(crate) fn run_hook(hook: &str, install_dir: &std::path::Path, label: &str) {
             format!("Failed to run {label} hook: {e}").yellow()
         ),
     }
+}
+
+/// Download and parse the upstream checksum file for an asset.
+/// Returns `Some(expected_hash)` when verification is enabled and a checksum file is found.
+async fn fetch_expected_checksum(
+    client: &Client,
+    release: &grel_providers::Release,
+    asset: &RemoteAsset,
+    config: &Config,
+    manifest: Option<&Manifest>,
+) -> Result<Option<String>, anyhow::Error> {
+    if !config.security.verify_checksums {
+        return Ok(None);
+    }
+
+    let Some((checksum_asset, _algo)) =
+        ChecksumVerifier::find_checksum_asset(&release.assets, asset, manifest)
+    else {
+        return Err(anyhow::anyhow!(
+            "Checksum verification enabled but no checksum file found for {}",
+            asset.filename
+        ));
+    };
+
+    println!(
+        "  {}",
+        format!("Verifying checksum from {}", checksum_asset.filename)
+            .dimmed()
+    );
+
+    let temp_path = std::env::temp_dir().join(&checksum_asset.filename);
+    let (_, _) = grel_network::download::download_file(
+        client,
+        &checksum_asset.url,
+        &temp_path,
+        None,
+        false,
+        None,
+    )
+    .await
+    .with_context(|| {
+        format!(
+            "Failed to download checksum file {}",
+            checksum_asset.filename
+        )
+    })?;
+
+    let content = tokio::fs::read_to_string(&temp_path)
+        .await
+        .with_context(|| {
+            format!(
+                "Failed to read checksum file {}",
+                temp_path.display()
+            )
+        })?;
+
+    tokio::fs::remove_file(&temp_path).await.ok();
+
+    let expected = ChecksumVerifier::parse_checksum(&content, &asset.filename)
+        .with_context(|| {
+            format!(
+                "Failed to parse checksum file {}",
+                checksum_asset.filename
+            )
+        })?;
+
+    Ok(Some(expected))
+}
+
+/// Verify a downloaded archive against an expected checksum.
+/// On mismatch, deletes the archive and returns an error.
+fn verify_checksum_or_clean(
+    computed: &str,
+    expected: &str,
+    archive_path: &std::path::Path,
+    filename: &str,
+) -> Result<(), anyhow::Error> {
+    if let Err(e) = ChecksumVerifier::verify(computed, expected) {
+        std::fs::remove_file(archive_path).ok();
+        return Err(anyhow::anyhow!(
+            "Checksum verification failed for {}: {}",
+            filename,
+            e
+        ));
+    }
+    println!("  {}", "Checksum verified".dimmed());
+    Ok(())
 }
 
 /// Clean stale archives under a managed package directory.
@@ -415,6 +502,16 @@ async fn install_single_package(
         format_size(chosen_asset.size_bytes.unwrap_or(0))
     );
 
+    // Download checksum file if verification is enabled
+    let expected_checksum = fetch_expected_checksum(
+        client,
+        &release,
+        &chosen_asset,
+        config,
+        manifest.as_ref().map(|(m, _)| m),
+    )
+    .await?;
+
     // Check for cached ETag
     let cached_etag = db.get_etag(&chosen_asset.url).await.ok().flatten();
 
@@ -422,6 +519,11 @@ async fn install_single_package(
         grel_network::download::download_file(client, &chosen_asset.url, &archive_path, None, true, cached_etag.as_deref())
             .await
             .with_context(|| format!("Failed to download {}", chosen_asset.filename))?;
+
+    // Verify checksum
+    if let Some(expected) = expected_checksum {
+        verify_checksum_or_clean(&checksum, &expected, &archive_path, &chosen_asset.filename)?;
+    }
 
     // Store ETag for future conditional requests
     if let Some(etag) = response_etag {
@@ -1103,6 +1205,16 @@ pub async fn cmd_sync(ctx: &CommandContext<'_>, packages: &[String]) -> Result<(
             format_size(chosen_asset.size_bytes.unwrap_or(0))
         );
 
+        // Download checksum file if verification is enabled
+        let expected_checksum = fetch_expected_checksum(
+            &client,
+            &release,
+            &chosen_asset,
+            &ctx.config,
+            manifest.as_ref().map(|(m, _)| m),
+        )
+        .await?;
+
         // Check for cached ETag
         let cached_etag = db.get_etag(&chosen_asset.url).await.ok().flatten();
 
@@ -1110,6 +1222,11 @@ pub async fn cmd_sync(ctx: &CommandContext<'_>, packages: &[String]) -> Result<(
             grel_network::download::download_file(&client, &chosen_asset.url, &archive_path, None, true, cached_etag.as_deref())
                 .await
                 .with_context(|| format!("Failed to download {}", chosen_asset.filename))?;
+
+        // Verify checksum
+        if let Some(expected) = expected_checksum {
+            verify_checksum_or_clean(&checksum, &expected, &archive_path, &chosen_asset.filename)?;
+        }
 
         // Store ETag for future conditional requests
         if let Some(etag) = response_etag {
@@ -1847,6 +1964,16 @@ async fn upgrade_single_package(
     std::fs::create_dir_all(&install_dir)
         .map_err(|e| anyhow::anyhow!("Failed to create directory: {e}"))?;
 
+    // Download checksum file if verification is enabled
+    let expected_checksum = fetch_expected_checksum(
+        client,
+        &release,
+        &asset,
+        config,
+        None, // Upgrade path does not currently resolve manifests
+    )
+    .await?;
+
     let temp_path = archive_path.with_extension("part");
     // Check for cached ETag
     let cached_etag = db.get_etag(&asset.url).await.ok().flatten();
@@ -1854,6 +1981,11 @@ async fn upgrade_single_package(
     let (checksum, response_etag) = grel_network::download::download_file(client, &asset.url, &temp_path, None, true, cached_etag.as_deref())
         .await
         .with_context(|| format!("Failed to download {}", asset.filename))?;
+
+    // Verify checksum
+    if let Some(expected) = expected_checksum {
+        verify_checksum_or_clean(&checksum, &expected, &temp_path, &asset.filename)?;
+    }
 
     // Store ETag for future conditional requests
     if let Some(etag) = response_etag {

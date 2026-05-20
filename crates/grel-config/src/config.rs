@@ -348,6 +348,12 @@ pub struct SecurityConfig {
     #[serde(default = "default_verify_signatures")]
     pub verify_signatures: bool,
 
+    /// Verify upstream checksums on downloaded assets.
+    /// When true, grel will download and compare the published
+    /// checksum (sha256/sha512/md5) against the computed hash.
+    #[serde(default = "default_verify_checksums")]
+    pub verify_checksums: bool,
+
     /// Enable execution of manifest hooks (post_install / pre_remove).
     /// Disabled by default for security.
     #[serde(default = "default_enable_hooks")]
@@ -358,12 +364,17 @@ impl Default for SecurityConfig {
     fn default() -> Self {
         Self {
             verify_signatures: default_verify_signatures(),
+            verify_checksums: default_verify_checksums(),
             enable_hooks: default_enable_hooks(),
         }
     }
 }
 
 fn default_verify_signatures() -> bool {
+    false
+}
+
+fn default_verify_checksums() -> bool {
     false
 }
 
