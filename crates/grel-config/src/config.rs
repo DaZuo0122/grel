@@ -358,6 +358,16 @@ pub struct SecurityConfig {
     /// Disabled by default for security.
     #[serde(default = "default_enable_hooks")]
     pub enable_hooks: bool,
+
+    /// Trusted PGP public keys (ASCII-armored or binary, one per element).
+    /// Used to verify GPG detached signatures when verify_signatures is true.
+    #[serde(default)]
+    pub trusted_pgp_keys: Vec<String>,
+
+    /// Minisign public key (base64 encoded, e.g. "RWQf6LRCGA9i53ml...").
+    /// Used to verify minisign signatures when verify_signatures is true.
+    #[serde(default)]
+    pub minisign_public_key: Option<String>,
 }
 
 impl Default for SecurityConfig {
@@ -366,6 +376,8 @@ impl Default for SecurityConfig {
             verify_signatures: default_verify_signatures(),
             verify_checksums: default_verify_checksums(),
             enable_hooks: default_enable_hooks(),
+            trusted_pgp_keys: Vec::new(),
+            minisign_public_key: None,
         }
     }
 }
