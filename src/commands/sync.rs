@@ -1059,10 +1059,16 @@ pub async fn cmd_sync(ctx: &CommandContext<'_>, packages: &[String]) -> Result<(
     let allow_keyword = ctx.cli.allow_keyword();
     let noconfirm = ctx.cli.noconfirm;
 
+    if !ctx.config.security.verify_checksums {
+        eprintln!(
+            "{}",
+            "Warning: Checksum verification is disabled. Set security.verify_checksums = true in your config.".yellow()
+        );
+    }
     if !ctx.config.security.verify_signatures {
         eprintln!(
             "{}",
-            "Warning: Signature verification is disabled. Install at your own risk.".yellow()
+            "Warning: Signature verification is disabled. Set security.verify_signatures = true in your config.".yellow()
         );
     }
 
@@ -2103,7 +2109,13 @@ async fn upgrade_single_package(
     } else {
         eprintln!(
             "{}",
-            "Warning: Signature verification is disabled. Install at your own risk.".yellow()
+            "Warning: Signature verification is disabled. Set security.verify_signatures = true in your config.".yellow()
+        );
+    }
+    if !config.security.verify_checksums {
+        eprintln!(
+            "{}",
+            "Warning: Checksum verification is disabled. Set security.verify_checksums = true in your config.".yellow()
         );
     }
 

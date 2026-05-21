@@ -387,7 +387,7 @@ fn default_verify_signatures() -> bool {
 }
 
 fn default_verify_checksums() -> bool {
-    false
+    true
 }
 
 fn default_enable_hooks() -> bool {
