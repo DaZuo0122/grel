@@ -6,7 +6,7 @@ use anyhow::{Context, Result};
 use grel_cache::{Database, models};
 use grel_config::Config;
 use grel_core::Forge;
-use grel_core::{Arch, ChecksumVerifier, Manifest, Os, PackageRef, RemoteAsset, ResolverConfig};
+use grel_core::{Arch, ChecksumVerifier, Manifest, Os, PackageRef, RemoteAsset, ResolverConfig, SignatureVerifier};
 use grel_network::{Client, build_http_client};
 use grel_providers::ProviderRegistry;
 use owo_colors::OwoColorize;
@@ -271,6 +271,82 @@ fn verify_checksum_or_clean(
     Ok(())
 }
 
+/// Download a signature file and cryptographically verify `archive_path`.
+async fn verify_signature_for_asset(
+    client: &Client,
+    release: &grel_providers::Release,
+    asset: &RemoteAsset,
+    archive_path: &std::path::Path,
+    security: &grel_config::SecurityConfig,
+    manifest: Option<&grel_core::Manifest>,
+) -> Result<(), anyhow::Error> {
+    let Some((sig_asset, kind)) =
+        SignatureVerifier::find_signature_asset(&release.assets, asset, manifest)
+    else {
+        return Err(anyhow::anyhow!(
+            "No signature file found for {}",
+            asset.filename
+        ));
+    };
+
+    println!(
+        "  {}",
+        format!("Verifying signature from {}", sig_asset.filename)
+            .dimmed()
+    );
+
+    // Download signature file to temp
+    let sig_temp = std::env::temp_dir().join(&sig_asset.filename);
+    let (_, _) = grel_network::download::download_file(
+        client,
+        &sig_asset.url,
+        &sig_temp,
+        None,
+        false,
+        None,
+    )
+    .await
+    .with_context(|| {
+        format!(
+            "Failed to download signature {}",
+            sig_asset.filename
+        )
+    })?;
+
+    let sig_bytes = tokio::fs::read(&sig_temp).await?;
+    tokio::fs::remove_file(&sig_temp).await.ok();
+
+    // Read the message (downloaded archive)
+    let message_bytes = tokio::fs::read(archive_path).await?;
+
+    match kind {
+        grel_core::SignatureKind::GpgAsc | grel_core::SignatureKind::GpgBinary => {
+            if security.trusted_pgp_keys.is_empty() {
+                return Err(anyhow::anyhow!(
+                    "Signature verification requires trusted_pgp_keys in config"
+                ));
+            }
+            SignatureVerifier::verify_gpg(
+                &sig_bytes,
+                &message_bytes,
+                &security.trusted_pgp_keys,
+            )
+            .with_context(|| "GPG signature verification failed")?;
+        }
+        grel_core::SignatureKind::Minisign => {
+            let Some(ref pk) = security.minisign_public_key else {
+                return Err(anyhow::anyhow!(
+                    "Minisign signature verification requires minisign_public_key in config"
+                ));
+            };
+            SignatureVerifier::verify_minisign(&sig_bytes, &message_bytes, pk)
+                .with_context(|| "Minisign signature verification failed")?;
+        }
+    }
+
+    Ok(())
+}
+
 /// Clean stale archives under a managed package directory.
 /// Returns (removed_count, failed_count).
 pub(crate) fn clean_package_dir(
@@ -442,6 +518,22 @@ async fn install_single_package(
         }
     };
 
+    // Fail-fast if signature verification is enabled but no signature file is available
+    if config.security.verify_signatures {
+        if SignatureVerifier::find_signature_asset(
+            &release.assets,
+            &chosen_asset,
+            manifest.as_ref().map(|(m, _)| m),
+        )
+        .is_none()
+        {
+            return Err(anyhow::anyhow!(
+                "Signature verification enabled but no signature file found for {}",
+                chosen_asset.filename
+            ));
+        }
+    }
+
     let is_managed = if download_only {
         false
     } else {
@@ -523,6 +615,28 @@ async fn install_single_package(
     // Verify checksum
     if let Some(expected) = expected_checksum {
         verify_checksum_or_clean(&checksum, &expected, &archive_path, &chosen_asset.filename)?;
+    }
+
+    // Verify cryptographic signature
+    if config.security.verify_signatures {
+        if let Err(e) = verify_signature_for_asset(
+            client,
+            &release,
+            &chosen_asset,
+            &archive_path,
+            &config.security,
+            manifest.as_ref().map(|(m, _)| m),
+        )
+        .await
+        {
+            std::fs::remove_file(&archive_path).ok();
+            return Err(anyhow::anyhow!(
+                "Signature verification failed for {}: {}",
+                chosen_asset.filename,
+                e
+            ));
+        }
+        println!("  {}", "Signature verified".dimmed());
     }
 
     // Store ETag for future conditional requests
@@ -1126,12 +1240,15 @@ pub async fn cmd_sync(ctx: &CommandContext<'_>, packages: &[String]) -> Result<(
             }
         };
 
-        // Signature verification enforcement
+        // Check if a signature file is available (fail-fast before download)
         if ctx.config.security.verify_signatures {
-            let sig_name = format!("{}.sig", chosen_asset.filename);
-            let asc_name = format!("{}.asc", chosen_asset.filename);
-            let has_sig = release.assets.iter().any(|a| a.filename == sig_name || a.filename == asc_name);
-            if !has_sig {
+            if SignatureVerifier::find_signature_asset(
+                &release.assets,
+                &chosen_asset,
+                manifest.as_ref().map(|(m, _)| m),
+            )
+            .is_none()
+            {
                 eprintln!(
                     "  {}",
                     format!(
@@ -1142,10 +1259,6 @@ pub async fn cmd_sync(ctx: &CommandContext<'_>, packages: &[String]) -> Result<(
                 );
                 continue;
             }
-            println!(
-                "  {}",
-                format!("Signature file found for {}", chosen_asset.filename).dimmed()
-            );
         }
 
         let is_managed = if ctx.cli.download_only {
@@ -1226,6 +1339,28 @@ pub async fn cmd_sync(ctx: &CommandContext<'_>, packages: &[String]) -> Result<(
         // Verify checksum
         if let Some(expected) = expected_checksum {
             verify_checksum_or_clean(&checksum, &expected, &archive_path, &chosen_asset.filename)?;
+        }
+
+        // Verify cryptographic signature
+        if ctx.config.security.verify_signatures {
+            if let Err(e) = verify_signature_for_asset(
+                &client,
+                &release,
+                &chosen_asset,
+                &archive_path,
+                &ctx.config.security,
+                manifest.as_ref().map(|(m, _)| m),
+            )
+            .await
+            {
+                std::fs::remove_file(&archive_path).ok();
+                return Err(anyhow::anyhow!(
+                    "Signature verification failed for {}: {}",
+                    chosen_asset.filename,
+                    e
+                ));
+            }
+            println!("  {}", "Signature verified".dimmed());
         }
 
         // Store ETag for future conditional requests
@@ -1952,7 +2087,20 @@ async fn upgrade_single_package(
         config.paths.download_dir.clone()
     };
 
-    if !config.security.verify_signatures {
+    if config.security.verify_signatures {
+        if SignatureVerifier::find_signature_asset(
+            &release.assets,
+            &asset,
+            None, // Upgrade path does not currently resolve manifests
+        )
+        .is_none()
+        {
+            return Err(anyhow::anyhow!(
+                "Signature verification enabled but no signature file found for {}",
+                asset.filename
+            ));
+        }
+    } else {
         eprintln!(
             "{}",
             "Warning: Signature verification is disabled. Install at your own risk.".yellow()
@@ -1985,6 +2133,28 @@ async fn upgrade_single_package(
     // Verify checksum
     if let Some(expected) = expected_checksum {
         verify_checksum_or_clean(&checksum, &expected, &temp_path, &asset.filename)?;
+    }
+
+    // Verify cryptographic signature
+    if config.security.verify_signatures {
+        if let Err(e) = verify_signature_for_asset(
+            client,
+            &release,
+            &asset,
+            &temp_path,
+            &config.security,
+            None, // Upgrade path does not currently resolve manifests
+        )
+        .await
+        {
+            std::fs::remove_file(&temp_path).ok();
+            return Err(anyhow::anyhow!(
+                "Signature verification failed for {}: {}",
+                asset.filename,
+                e
+            ));
+        }
+        println!("  {}", "Signature verified".dimmed());
     }
 
     // Store ETag for future conditional requests
