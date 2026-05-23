@@ -6,7 +6,7 @@ use grel_core::{AssetTokens, RemoteAsset};
 use crate::github::GitHubRelease;
 
 /// A release from a git forge
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Release {
     pub tag: String,
     pub name: String,
@@ -27,7 +27,7 @@ pub struct SearchResult {
 }
 
 /// Type of provider
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ProviderType {
     GitHub,
     GitLab,
