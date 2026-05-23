@@ -80,7 +80,7 @@ impl Default for ResolverConfig {
 }
 
 /// A remote asset from a release
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct RemoteAsset {
     pub filename: String,
     pub url: String,

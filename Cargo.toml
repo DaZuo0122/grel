@@ -37,6 +37,7 @@ tabled.workspace = true
 owo-colors.workspace = true
 chrono.workspace = true
 sha2.workspace = true
+serde_json.workspace = true
 
 [lints]
 workspace = true
