@@ -102,6 +102,15 @@ pub async fn cmd_db_clean(ctx: &CommandContext<'_>) -> Result<()> {
         Err(e) => eprintln!("  Warning: failed to clean manifest cache: {e}"),
     }
 
+    // Clean old content store entries (older than 30 days)
+    let content_store = grel_network::ContentStore::new(
+        ctx.config.paths.install_root.join("cache/downloads"),
+    );
+    match content_store.clean_old(30) {
+        Ok(count) => println!("  Cleaned {count} old content store entries"),
+        Err(e) => eprintln!("  Warning: failed to clean content store: {e}"),
+    }
+
     db.close().await;
     Ok(())
 }

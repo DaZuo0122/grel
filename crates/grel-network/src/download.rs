@@ -9,7 +9,50 @@ use crate::Client;
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt;
 
-use crate::NetworkError;
+use crate::{ContentStore, NetworkError};
+
+/// Download a single file with optional content-addressed caching.
+///
+/// If `content_store` and `expected_sha256` are provided and the store already
+/// contains the expected hash, the download is skipped and a link/copy from the
+/// store to `dest` is created.
+///
+/// After a successful download the file is copied into the content store so that
+/// future requests for the same hash can be served from cache.
+pub async fn download_file_with_store(
+    client: &Client,
+    url: &str,
+    dest: &Path,
+    progress_bar: Option<&ProgressBar>,
+    resume: bool,
+    etag: Option<&str>,
+    content_store: Option<&ContentStore>,
+    expected_sha256: Option<&str>,
+) -> Result<(String, Option<String>), NetworkError> {
+    // Cache hit — skip the network entirely
+    if let (Some(store), Some(expected)) = (content_store, expected_sha256) {
+        if store.contains(expected) {
+            return match store.link_to(expected, dest) {
+                Ok(()) => Ok((expected.to_string(), None)),
+                Err(e) => Err(NetworkError::OperationFailed(format!(
+                    "Failed to link from content store: {e}"
+                ))),
+            };
+        }
+    }
+
+    let result = download_file(client, url, dest, progress_bar, resume, etag).await?;
+
+    // Store in content cache for future reuse (best-effort)
+    if let Some(store) = content_store {
+        let (checksum, _) = &result;
+        if let Err(e) = store.insert_from_path(dest, checksum) {
+            tracing::warn!("Failed to insert download into content store: {}", e);
+        }
+    }
+
+    Ok(result)
+}
 
 /// Download a single file
 ///

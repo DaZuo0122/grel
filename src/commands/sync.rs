@@ -741,10 +741,20 @@ async fn install_single_package(
     // Check for cached ETag
     let cached_etag = db.get_etag(&chosen_asset.url).await.ok().flatten();
 
-    let (checksum, response_etag) =
-        grel_network::download::download_file(client, &chosen_asset.url, &archive_path, None, true, cached_etag.as_deref())
-            .await
-            .with_context(|| format!("Failed to download {}", chosen_asset.filename))?;
+    let content_store =
+        grel_network::ContentStore::new(config.paths.install_root.join("cache/downloads"));
+    let (checksum, response_etag) = grel_network::download::download_file_with_store(
+        client,
+        &chosen_asset.url,
+        &archive_path,
+        None,
+        true,
+        cached_etag.as_deref(),
+        Some(&content_store),
+        expected_checksum.as_deref(),
+    )
+    .await
+    .with_context(|| format!("Failed to download {}", chosen_asset.filename))?;
 
     // Verify checksum
     if let Some(expected) = expected_checksum {
@@ -1494,10 +1504,20 @@ pub async fn cmd_sync(ctx: &CommandContext<'_>, packages: &[String]) -> Result<(
         // Check for cached ETag
         let cached_etag = db.get_etag(&chosen_asset.url).await.ok().flatten();
 
-        let (checksum, response_etag) =
-            grel_network::download::download_file(&client, &chosen_asset.url, &archive_path, None, true, cached_etag.as_deref())
-                .await
-                .with_context(|| format!("Failed to download {}", chosen_asset.filename))?;
+        let content_store =
+            grel_network::ContentStore::new(ctx.config.paths.install_root.join("cache/downloads"));
+        let (checksum, response_etag) = grel_network::download::download_file_with_store(
+            &client,
+            &chosen_asset.url,
+            &archive_path,
+            None,
+            true,
+            cached_etag.as_deref(),
+            Some(&content_store),
+            expected_checksum.as_deref(),
+        )
+        .await
+        .with_context(|| format!("Failed to download {}", chosen_asset.filename))?;
 
         // Verify checksum
         if let Some(expected) = expected_checksum {
@@ -2333,9 +2353,20 @@ async fn upgrade_single_package(
     // Check for cached ETag
     let cached_etag = db.get_etag(&asset.url).await.ok().flatten();
 
-    let (checksum, response_etag) = grel_network::download::download_file(client, &asset.url, &temp_path, None, true, cached_etag.as_deref())
-        .await
-        .with_context(|| format!("Failed to download {}", asset.filename))?;
+    let content_store =
+        grel_network::ContentStore::new(config.paths.install_root.join("cache/downloads"));
+    let (checksum, response_etag) = grel_network::download::download_file_with_store(
+        client,
+        &asset.url,
+        &temp_path,
+        None,
+        true,
+        cached_etag.as_deref(),
+        Some(&content_store),
+        expected_checksum.as_deref(),
+    )
+    .await
+    .with_context(|| format!("Failed to download {}", asset.filename))?;
 
     // Verify checksum
     if let Some(expected) = expected_checksum {
