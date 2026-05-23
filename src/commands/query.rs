@@ -323,7 +323,7 @@ pub async fn cmd_info_remote(ctx: &CommandContext<'_>, pkg_ref_str: String) -> R
     let pkg_ref = PackageRef::parse_with_forge(&pkg_ref_str, ctx.default_forge())
         .with_context(|| format!("Invalid package reference: {pkg_ref_str}"))?;
 
-    let client = grel_network::build_http_client(&Config::default().general)?;
+    let client = grel_network::build_http_client(&Config::default().general, None)?;
     let github_token = std::env::var("GREL_GITHUB_TOKEN").ok();
     let registry = grel_providers::ProviderRegistry::new(client, github_token);
 

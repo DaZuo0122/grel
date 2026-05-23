@@ -7,7 +7,7 @@ use grel_cache::{Database, models};
 use grel_config::Config;
 use grel_core::Forge;
 use grel_core::{Arch, ChecksumVerifier, Manifest, Os, PackageRef, RemoteAsset, ResolverConfig, SignatureVerifier};
-use grel_network::{Client, build_http_client};
+use grel_network::{Client, DnsCache, build_http_client};
 use grel_providers::ProviderRegistry;
 use owo_colors::OwoColorize;
 
@@ -1020,7 +1020,13 @@ pub async fn cmd_sync(ctx: &CommandContext<'_>, packages: &[String]) -> Result<(
     println!("{}", "Resolving packages...".bold());
 
     let db = ctx.db().await?;
-    let client = build_http_client(&ctx.config.general)?;
+    let dns_cache = DnsCache::new(300).with_db(db.clone());
+    let _ = dns_cache.load_from_db().await;
+    // Prime DNS cache for common API hostnames
+    for hostname in ["api.github.com", "gitlab.com", "gitea.com", "codeberg.org"] {
+        let _ = dns_cache.resolve(hostname).await;
+    }
+    let client = build_http_client(&ctx.config.general, Some(&dns_cache))?;
     let github_token = std::env::var("GREL_GITHUB_TOKEN").ok();
     let provider_registry = ProviderRegistry::new(client.clone(), github_token);
 
@@ -1596,7 +1602,13 @@ pub async fn cmd_search(
         format!("Searching for \"{pattern}\" on {}...", ctx.default_forge()).bold()
     );
 
-    let client = build_http_client(&ctx.config.general)?;
+    let db = ctx.db().await?;
+    let dns_cache = DnsCache::new(300).with_db(db.clone());
+    let _ = dns_cache.load_from_db().await;
+    for hostname in ["api.github.com", "gitlab.com", "gitea.com", "codeberg.org"] {
+        let _ = dns_cache.resolve(hostname).await;
+    }
+    let client = build_http_client(&ctx.config.general, Some(&dns_cache))?;
     let github_token = std::env::var("GREL_GITHUB_TOKEN").ok();
     let provider_registry = ProviderRegistry::new(client, github_token);
 
@@ -1657,7 +1669,12 @@ pub async fn cmd_sync_refresh(ctx: &CommandContext<'_>) -> Result<()> {
         return Ok(());
     }
 
-    let client = build_http_client(&ctx.config.general)?;
+    let dns_cache = DnsCache::new(300).with_db(db.clone());
+    let _ = dns_cache.load_from_db().await;
+    for hostname in ["api.github.com", "gitlab.com", "gitea.com", "codeberg.org"] {
+        let _ = dns_cache.resolve(hostname).await;
+    }
+    let client = build_http_client(&ctx.config.general, Some(&dns_cache))?;
     let github_token = std::env::var("GREL_GITHUB_TOKEN").ok();
     let registry = ProviderRegistry::new(client, github_token);
 
@@ -1823,7 +1840,12 @@ pub async fn cmd_upgrade(ctx: &CommandContext<'_>) -> Result<()> {
         return Ok(());
     }
 
-    let client = build_http_client(&ctx.config.general)?;
+    let dns_cache = DnsCache::new(300).with_db(db.clone());
+    let _ = dns_cache.load_from_db().await;
+    for hostname in ["api.github.com", "gitlab.com", "gitea.com", "codeberg.org"] {
+        let _ = dns_cache.resolve(hostname).await;
+    }
+    let client = build_http_client(&ctx.config.general, Some(&dns_cache))?;
     let github_token = std::env::var("GREL_GITHUB_TOKEN").ok();
     let registry = ProviderRegistry::new(client.clone(), github_token);
 

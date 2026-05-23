@@ -14,7 +14,7 @@ use grel_network::{build_http_client, download};
 use grel_providers::ProviderRegistry;
 
 fn make_client() -> grel_network::Client {
-    build_http_client(&GeneralConfig::default()).expect("failed to build HTTP client")
+    build_http_client(&GeneralConfig::default(), None).expect("failed to build HTTP client")
 }
 
 fn make_registry() -> ProviderRegistry {
