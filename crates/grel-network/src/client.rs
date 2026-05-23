@@ -6,17 +6,36 @@ use grel_config::GeneralConfig;
 use reqwest_middleware::ClientBuilder;
 use reqwest_retry::{RetryTransientMiddleware, policies::ExponentialBackoff};
 
+use crate::DnsCache;
+
 /// Re-export of the underlying HTTP client type (with retry middleware)
 pub type Client = reqwest_middleware::ClientWithMiddleware;
 
-/// Build a configured HTTP client with retry middleware
-pub fn build_http_client(config: &GeneralConfig) -> Result<Client, NetworkError> {
+/// Build a configured HTTP client with retry middleware.
+///
+/// If a `dns_cache` is provided, cached hostnames are pre-resolved so that
+/// reqwest skips the system resolver for those domains.
+pub fn build_http_client(
+    config: &GeneralConfig,
+    dns_cache: Option<&DnsCache>,
+) -> Result<Client, NetworkError> {
     let mut builder = reqwest::Client::builder()
         // GitHub API requires a User-Agent header
         .user_agent("grel-rs/0.1.0")
         .timeout(Duration::from_secs(config.timeout_secs))
         .connect_timeout(Duration::from_secs(config.connect_timeout_secs))
         .pool_max_idle_per_host(config.pool_max_idle);
+
+    // Pre-resolve cached hostnames
+    if let Some(cache) = dns_cache {
+        for (hostname, entry) in cache.iter_entries() {
+            if let Some(ip_str) = &entry.fastest_ip {
+                if let Ok(addr) = ip_str.parse::<std::net::IpAddr>() {
+                    builder = builder.resolve(&hostname, std::net::SocketAddr::new(addr, 443));
+                }
+            }
+        }
+    }
 
     // Proxy configuration
     let proxy_url = resolve_proxy(config);

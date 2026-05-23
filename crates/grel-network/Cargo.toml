@@ -35,6 +35,7 @@ tempfile = "3"
 wiremock.workspace = true
 reqwest-middleware.workspace = true
 reqwest-retry.workspace = true
+chrono.workspace = true
 
 [lints]
 workspace = true

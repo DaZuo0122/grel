@@ -7,6 +7,7 @@ use sqlx::{Row, SqlitePool};
 use crate::models::{InstalledPackage, ManifestSource, PackageStatus};
 
 /// Database connection wrapper
+#[derive(Clone)]
 pub struct Database {
     pool: SqlitePool,
 }
@@ -897,6 +898,48 @@ impl Database {
         Ok(result.rows_affected())
     }
 
+    /// Load all non-expired DNS cache entries.
+    pub async fn get_dns_cache(&self) -> Result<Vec<(String, String, i64, i64)>, DatabaseError> {
+        let rows = sqlx::query(
+            "SELECT hostname, ip_address, rtt_ms, expires_at FROM dns_cache WHERE expires_at >= strftime('%s', 'now')",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(|r| {
+                (
+                    r.get::<String, _>("hostname"),
+                    r.get::<String, _>("ip_address"),
+                    r.get::<i64, _>("rtt_ms"),
+                    r.get::<i64, _>("expires_at"),
+                )
+            })
+            .collect())
+    }
+
+    /// Store a single DNS cache entry.
+    pub async fn store_dns_entry(
+        &self,
+        hostname: &str,
+        ip_address: &str,
+        rtt_ms: i64,
+        expires_at: i64,
+    ) -> Result<(), DatabaseError> {
+        sqlx::query(
+            "INSERT OR REPLACE INTO dns_cache (hostname, ip_address, rtt_ms, expires_at) VALUES (?, ?, ?, ?)",
+        )
+        .bind(hostname)
+        .bind(ip_address)
+        .bind(rtt_ms)
+        .bind(expires_at)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
     /// Remove expired DNS cache entries.
     pub async fn clean_dns_cache(&self) -> Result<u64, DatabaseError> {
         let result = sqlx::query(
@@ -1231,6 +1274,61 @@ mod tests {
             .await
             .unwrap();
         assert!(row.is_some());
+
+        db.close().await;
+    }
+
+    #[tokio::test]
+    async fn get_dns_cache_skips_expired_entries() {
+        let db = open_test_db().await;
+        let now = chrono::Utc::now().timestamp();
+
+        // Insert expired and valid entries
+        sqlx::query(
+            "INSERT OR REPLACE INTO dns_cache (hostname, ip_address, rtt_ms, expires_at) VALUES (?, ?, ?, ?)",
+        )
+        .bind("old.example.com")
+        .bind("1.2.3.4")
+        .bind(10i64)
+        .bind(now - 1)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "INSERT OR REPLACE INTO dns_cache (hostname, ip_address, rtt_ms, expires_at) VALUES (?, ?, ?, ?)",
+        )
+        .bind("new.example.com")
+        .bind("5.6.7.8")
+        .bind(20i64)
+        .bind(now + 300)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+
+        let entries = db.get_dns_cache().await.unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].0, "new.example.com");
+        assert_eq!(entries[0].1, "5.6.7.8");
+        assert_eq!(entries[0].2, 20);
+
+        db.close().await;
+    }
+
+    #[tokio::test]
+    async fn store_dns_entry_round_trip() {
+        let db = open_test_db().await;
+        let now = chrono::Utc::now().timestamp();
+
+        db.store_dns_entry("test.example.com", "9.8.7.6", 42, now + 300)
+            .await
+            .unwrap();
+
+        let entries = db.get_dns_cache().await.unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].0, "test.example.com");
+        assert_eq!(entries[0].1, "9.8.7.6");
+        assert_eq!(entries[0].2, 42);
 
         db.close().await;
     }

@@ -31,7 +31,7 @@ async fn download_completes_successfully() {
         .mount(&server)
         .await;
 
-    let client = build_http_client(&test_config()).unwrap();
+    let client = build_http_client(&test_config(), None).unwrap();
     let dest = tempfile::NamedTempFile::new().unwrap().into_temp_path();
 
     let (checksum, etag) = download_file(&client, &format!("{}/file", server.uri()), &dest, None, false, None)
@@ -71,7 +71,7 @@ async fn download_with_etag_conditional_request() {
         .mount(&server)
         .await;
 
-    let client = build_http_client(&test_config()).unwrap();
+    let client = build_http_client(&test_config(), None).unwrap();
     let dest = tempfile::NamedTempFile::new().unwrap().into_temp_path();
 
     // First download
@@ -115,7 +115,7 @@ async fn download_resumes_partial_file() {
         .mount(&server)
         .await;
 
-    let client = build_http_client(&test_config()).unwrap();
+    let client = build_http_client(&test_config(), None).unwrap();
     let dest = tempfile::NamedTempFile::new().unwrap().into_temp_path();
 
     // Write partial content first
@@ -156,7 +156,7 @@ async fn download_range_not_satisfiable_means_complete() {
         .mount(&server)
         .await;
 
-    let client = build_http_client(&test_config()).unwrap();
+    let client = build_http_client(&test_config(), None).unwrap();
     let dest = tempfile::NamedTempFile::new().unwrap().into_temp_path();
 
     // Write complete content first
@@ -191,7 +191,7 @@ async fn download_server_error_fails_immediately() {
         .mount(&server)
         .await;
 
-    let client = build_http_client(&test_config()).unwrap();
+    let client = build_http_client(&test_config(), None).unwrap();
     let dest = tempfile::NamedTempFile::new().unwrap().into_temp_path();
 
     let result = download_file(&client, &format!("{}/file", server.uri()), &dest, None, false, None).await;
@@ -209,7 +209,7 @@ async fn download_not_found_fails_immediately() {
         .mount(&server)
         .await;
 
-    let client = build_http_client(&test_config()).unwrap();
+    let client = build_http_client(&test_config(), None).unwrap();
     let dest = tempfile::NamedTempFile::new().unwrap().into_temp_path();
 
     let result = download_file(&client, &format!("{}/file", server.uri()), &dest, None, false, None).await;
