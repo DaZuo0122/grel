@@ -95,6 +95,7 @@ async fn resolve_manifest(
     pkg_ref: &PackageRef,
     registry: &grel_core::Registry,
     provider: &dyn grel_providers::ReleaseProvider,
+    db: &grel_cache::Database,
 ) -> Option<(grel_core::Manifest, grel_cache::models::ManifestSource)> {
     // Tier 1: Central registry
     if registry.is_available() {
@@ -106,21 +107,58 @@ async fn resolve_manifest(
         }
     }
 
-    // Tier 2: In-repo .grel.toml
+    // Tier 2: In-repo .grel.toml (with caching)
     for branch in &["main", "master", "HEAD"] {
+        // Check cache first
+        if let Ok(Some((content, _etag))) = db
+            .get_manifest_cache(&pkg_ref.owner, &pkg_ref.repo, branch, ".grel.toml")
+            .await
+        {
+            match grel_core::Manifest::load_from_str(&content) {
+                Ok(manifest) => {
+                    tracing::debug!(
+                        "Found cached in-repo manifest for {}",
+                        pkg_ref.to_short_ref()
+                    );
+                    return Some((manifest, grel_cache::models::ManifestSource::InRepo));
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "Invalid cached .grel.toml in {}: {}",
+                        pkg_ref.to_short_ref(),
+                        e
+                    );
+                }
+            }
+        }
+
         match provider
             .fetch_raw_file(&pkg_ref.owner, &pkg_ref.repo, ".grel.toml", branch)
             .await
         {
-            Ok(content) => match grel_core::Manifest::load_from_str(&content) {
-                Ok(manifest) => {
-                    tracing::debug!("Found in-repo manifest for {}", pkg_ref.to_short_ref());
-                    return Some((manifest, grel_cache::models::ManifestSource::InRepo));
+            Ok(content) => {
+                // Store in cache (best-effort)
+                let _ = db
+                    .store_manifest_cache(
+                        &pkg_ref.owner,
+                        &pkg_ref.repo,
+                        branch,
+                        ".grel.toml",
+                        &content,
+                        None,
+                        3600,
+                    )
+                    .await;
+                match grel_core::Manifest::load_from_str(&content) {
+                    Ok(manifest) => {
+                        tracing::debug!("Found in-repo manifest for {}", pkg_ref.to_short_ref());
+                        return Some((manifest, grel_cache::models::ManifestSource::InRepo));
+                    }
+                    Err(e) => {
+                        tracing::warn!("Invalid .grel.toml in {}: {}", pkg_ref.to_short_ref(), e);
+                    }
                 }
-                Err(e) => {
-                    tracing::warn!("Invalid .grel.toml in {}: {}", pkg_ref.to_short_ref(), e);
-                }
-            },
+            }
             Err(grel_providers::ProviderError::NotFound(_)) => continue,
             Err(e) => {
                 tracing::debug!(
@@ -133,6 +171,87 @@ async fn resolve_manifest(
     }
 
     None
+}
+
+/// Fetch a release with caching.
+///
+/// Checks the database cache first; on miss fetches from the provider and stores
+/// the result.  TTL is 5 minutes for `latest` and 1 hour for pinned tags.
+async fn fetch_release_with_cache(
+    db: &grel_cache::Database,
+    provider: &dyn grel_providers::ReleaseProvider,
+    forge: &str,
+    owner: &str,
+    repo: &str,
+    tag: Option<&str>,
+) -> Result<grel_providers::Release, grel_providers::ProviderError> {
+    let cache_tag = tag.unwrap_or("latest");
+    let ttl_secs = if tag.is_some() { 3600 } else { 300 };
+
+    // Try cache first
+    if let Ok(Some(json)) = db
+        .get_release_cache(forge, owner, repo, cache_tag)
+        .await {
+        match serde_json::from_str::<grel_providers::Release>(&json) {
+            Ok(release) => {
+                tracing::debug!("Release cache hit for {}/{}/{}", forge, owner, repo);
+                return Ok(release);
+            }
+            Err(e) => {
+                tracing::warn!("Failed to deserialize cached release for {}/{}/{}: {}", forge, owner, repo, e);
+            }
+        }
+    }
+
+    // Fetch from provider
+    let release = if let Some(t) = tag {
+        provider.get_release(owner, repo, t).await
+    } else {
+        provider.latest_release(owner, repo).await
+    };
+
+    if let Ok(ref r) = release {
+        // Store in cache (best-effort)
+        if let Ok(json) = serde_json::to_string(r) {
+            let _ = db
+                .store_release_cache(forge, owner, repo, cache_tag, &json, ttl_secs)
+                .await;
+        }
+    }
+
+    release
+}
+
+/// Check whether a package should be skipped because it is already up-to-date.
+/// Check rate limit state for a provider and warn if we're near the limit.
+async fn check_rate_limit(db: &grel_cache::Database, provider: &str) {
+    match db.get_rate_limit(provider).await {
+        Ok(Some((remaining, reset_at, _last_checked))) => {
+            let now = chrono::Utc::now().timestamp();
+            if remaining <= 0 && reset_at > now {
+                let wait_secs = reset_at - now;
+                eprintln!(
+                    "{}",
+                    format!(
+                        "Warning: {} rate limit exceeded. Reset in {} seconds.",
+                        provider, wait_secs
+                    )
+                    .yellow()
+                );
+            } else if remaining < 10 {
+                eprintln!(
+                    "{}",
+                    format!(
+                        "Warning: {} rate limit low ({} requests remaining).",
+                        provider, remaining
+                    )
+                    .yellow()
+                );
+            }
+        }
+        Ok(None) => {}
+        Err(e) => tracing::warn!("Failed to check rate limit for {}: {}", provider, e),
+    }
 }
 
 /// Check whether a package should be skipped because it is already up-to-date.
@@ -410,9 +529,15 @@ async fn install_single_package(
 
     let release = if let Some(ref tag) = pkg_ref.version {
         println!("  Pinning to version {tag}");
-        match provider
-            .get_release(&pkg_ref.owner, &pkg_ref.repo, tag)
-            .await
+        match fetch_release_with_cache(
+            db,
+            provider,
+            &pkg_ref.forge.to_string(),
+            &pkg_ref.owner,
+            &pkg_ref.repo,
+            Some(tag),
+        )
+        .await
         {
             Ok(r) => r,
             Err(grel_providers::ProviderError::NotFound(e)) => {
@@ -428,7 +553,16 @@ async fn install_single_package(
             }
         }
     } else {
-        match provider.latest_release(&pkg_ref.owner, &pkg_ref.repo).await {
+        match fetch_release_with_cache(
+            db,
+            provider,
+            &pkg_ref.forge.to_string(),
+            &pkg_ref.owner,
+            &pkg_ref.repo,
+            None,
+        )
+        .await
+        {
             Ok(r) => r,
             Err(grel_providers::ProviderError::NotFound(e)) => {
                 return Err(anyhow::anyhow!("Package not found: {e}"));
@@ -460,7 +594,7 @@ async fn install_single_package(
 
     let remote_assets: Vec<RemoteAsset> = release.assets.clone();
 
-    let manifest = resolve_manifest(pkg_ref, local_registry, provider).await;
+    let manifest = resolve_manifest(pkg_ref, local_registry, provider, db).await;
     let manifest_source = manifest
         .as_ref()
         .map(|(_, s)| s.clone())
@@ -1028,7 +1162,9 @@ pub async fn cmd_sync(ctx: &CommandContext<'_>, packages: &[String]) -> Result<(
     }
     let client = build_http_client(&ctx.config.general, Some(&dns_cache))?;
     let github_token = std::env::var("GREL_GITHUB_TOKEN").ok();
-    let provider_registry = ProviderRegistry::new(client.clone(), github_token);
+    let provider_registry = ProviderRegistry::new(client.clone(), github_token, Some(db.clone()));
+
+    check_rate_limit(&db, "github").await;
 
     let local_registry = grel_core::Registry::new(ctx.config.paths.install_root.join("registry"));
     if ctx.config.registry.auto_update && !ctx.config.registry.url.is_empty() {
@@ -1090,9 +1226,15 @@ pub async fn cmd_sync(ctx: &CommandContext<'_>, packages: &[String]) -> Result<(
 
         let release = if let Some(ref tag) = pkg_ref.version {
             println!("  Pinning to version {tag}");
-            match provider
-                .get_release(&pkg_ref.owner, &pkg_ref.repo, tag)
-                .await
+            match fetch_release_with_cache(
+                &db,
+                provider,
+                &pkg_ref.forge.to_string(),
+                &pkg_ref.owner,
+                &pkg_ref.repo,
+                Some(tag),
+            )
+            .await
             {
                 Ok(r) => r,
                 Err(grel_providers::ProviderError::NotFound(e)) => {
@@ -1112,7 +1254,16 @@ pub async fn cmd_sync(ctx: &CommandContext<'_>, packages: &[String]) -> Result<(
                 }
             }
         } else {
-            match provider.latest_release(&pkg_ref.owner, &pkg_ref.repo).await {
+            match fetch_release_with_cache(
+                &db,
+                provider,
+                &pkg_ref.forge.to_string(),
+                &pkg_ref.owner,
+                &pkg_ref.repo,
+                None,
+            )
+            .await
+            {
                 Ok(r) => r,
                 Err(grel_providers::ProviderError::NotFound(e)) => {
                     eprintln!("{}", format!("Package not found: {e}").red());
@@ -1148,7 +1299,7 @@ pub async fn cmd_sync(ctx: &CommandContext<'_>, packages: &[String]) -> Result<(
 
         let remote_assets: Vec<RemoteAsset> = release.assets.clone();
 
-        let manifest = resolve_manifest(&pkg_ref, &local_registry, provider).await;
+        let manifest = resolve_manifest(&pkg_ref, &local_registry, provider, &db).await;
         let manifest_source = manifest
             .as_ref()
             .map(|(_, s)| s.clone())
@@ -1610,7 +1761,7 @@ pub async fn cmd_search(
     }
     let client = build_http_client(&ctx.config.general, Some(&dns_cache))?;
     let github_token = std::env::var("GREL_GITHUB_TOKEN").ok();
-    let provider_registry = ProviderRegistry::new(client, github_token);
+    let provider_registry = ProviderRegistry::new(client, github_token, Some(db.clone()));
 
     let provider = provider_registry
         .get_provider(&ctx.default_forge())
@@ -1676,7 +1827,9 @@ pub async fn cmd_sync_refresh(ctx: &CommandContext<'_>) -> Result<()> {
     }
     let client = build_http_client(&ctx.config.general, Some(&dns_cache))?;
     let github_token = std::env::var("GREL_GITHUB_TOKEN").ok();
-    let registry = ProviderRegistry::new(client, github_token);
+    let registry = ProviderRegistry::new(client, github_token, Some(db.clone()));
+
+    check_rate_limit(&db, "github").await;
 
     let mut up_to_date = 0;
     let mut available_updates = 0;
@@ -1706,7 +1859,16 @@ pub async fn cmd_sync_refresh(ctx: &CommandContext<'_>) -> Result<()> {
             }
         };
 
-        match provider.latest_release(&pkg.owner, &pkg.repo).await {
+        match fetch_release_with_cache(
+            &db,
+            provider,
+            &forge.to_string(),
+            &pkg.owner,
+            &pkg.repo,
+            None,
+        )
+        .await
+        {
             Ok(release) => {
                 if let Some(id) = pkg.id {
                     db.update_last_checked(id).await.ok();
@@ -1847,7 +2009,9 @@ pub async fn cmd_upgrade(ctx: &CommandContext<'_>) -> Result<()> {
     }
     let client = build_http_client(&ctx.config.general, Some(&dns_cache))?;
     let github_token = std::env::var("GREL_GITHUB_TOKEN").ok();
-    let registry = ProviderRegistry::new(client.clone(), github_token);
+    let registry = ProviderRegistry::new(client.clone(), github_token, Some(db.clone()));
+
+    check_rate_limit(&db, "github").await;
 
     let host_os = Os::host();
     let host_arch = Arch::host();
@@ -1892,7 +2056,16 @@ pub async fn cmd_upgrade(ctx: &CommandContext<'_>) -> Result<()> {
             }
         }
 
-        let release = match provider.latest_release(&pkg.owner, &pkg.repo).await {
+        let release = match fetch_release_with_cache(
+            &db,
+            provider,
+            &pkg.forge,
+            &pkg.owner,
+            &pkg.repo,
+            None,
+        )
+        .await
+        {
             Ok(r) => r,
             Err(grel_providers::ProviderError::NotFound(_)) => {
                 if let Some(id) = pkg.id {

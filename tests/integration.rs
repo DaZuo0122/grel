@@ -20,7 +20,7 @@ fn make_client() -> grel_network::Client {
 fn make_registry() -> ProviderRegistry {
     let client = make_client();
     let token = std::env::var("GREL_GITHUB_TOKEN").ok();
-    ProviderRegistry::new(client, token)
+    ProviderRegistry::new(client, token, None)
 }
 
 // ---------------------------------------------------------------------------

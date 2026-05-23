@@ -325,7 +325,7 @@ pub async fn cmd_info_remote(ctx: &CommandContext<'_>, pkg_ref_str: String) -> R
 
     let client = grel_network::build_http_client(&Config::default().general, None)?;
     let github_token = std::env::var("GREL_GITHUB_TOKEN").ok();
-    let registry = grel_providers::ProviderRegistry::new(client, github_token);
+    let registry = grel_providers::ProviderRegistry::new(client, github_token, None);
 
     let provider = registry
         .get_provider(&pkg_ref.forge)
