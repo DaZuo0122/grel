@@ -348,23 +348,46 @@ pub struct SecurityConfig {
     #[serde(default = "default_verify_signatures")]
     pub verify_signatures: bool,
 
+    /// Verify upstream checksums on downloaded assets.
+    /// When true, grel will download and compare the published
+    /// checksum (sha256/sha512/md5) against the computed hash.
+    #[serde(default = "default_verify_checksums")]
+    pub verify_checksums: bool,
+
     /// Enable execution of manifest hooks (post_install / pre_remove).
     /// Disabled by default for security.
     #[serde(default = "default_enable_hooks")]
     pub enable_hooks: bool,
+
+    /// Trusted PGP public keys (ASCII-armored or binary, one per element).
+    /// Used to verify GPG detached signatures when verify_signatures is true.
+    #[serde(default)]
+    pub trusted_pgp_keys: Vec<String>,
+
+    /// Minisign public key (base64 encoded, e.g. "RWQf6LRCGA9i53ml...").
+    /// Used to verify minisign signatures when verify_signatures is true.
+    #[serde(default)]
+    pub minisign_public_key: Option<String>,
 }
 
 impl Default for SecurityConfig {
     fn default() -> Self {
         Self {
             verify_signatures: default_verify_signatures(),
+            verify_checksums: default_verify_checksums(),
             enable_hooks: default_enable_hooks(),
+            trusted_pgp_keys: Vec::new(),
+            minisign_public_key: None,
         }
     }
 }
 
 fn default_verify_signatures() -> bool {
     false
+}
+
+fn default_verify_checksums() -> bool {
+    true
 }
 
 fn default_enable_hooks() -> bool {
