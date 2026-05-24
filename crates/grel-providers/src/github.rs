@@ -1,27 +1,52 @@
 //! GitHub API implementation.
 
 use async_trait::async_trait;
-use reqwest::Client;
+use reqwest_middleware::ClientWithMiddleware;
 use serde::Deserialize;
 
 use crate::trait_def::{ProviderError, ProviderType, Release, ReleaseProvider, SearchResult};
 
 /// GitHub provider
 pub struct GitHubProvider {
-    client: Client,
+    client: ClientWithMiddleware,
     token: Option<String>,
+    db: Option<grel_cache::Database>,
 }
 
 impl GitHubProvider {
-    pub fn new(client: Client, token: Option<String>) -> Self {
-        Self { client, token }
+    pub fn new(client: ClientWithMiddleware, token: Option<String>) -> Self {
+        Self { client, token, db: None }
+    }
+
+    /// Attach a database for rate-limit tracking.
+    pub fn with_db(mut self, db: grel_cache::Database) -> Self {
+        self.db = Some(db);
+        self
+    }
+
+    /// Extract and store GitHub rate limit headers from a response.
+    async fn track_rate_limit(&self, response: &reqwest::Response) {
+        let Some(ref db) = self.db else { return };
+        let remaining = response
+            .headers()
+            .get("x-ratelimit-remaining")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.parse::<i64>().ok());
+        let reset_at = response
+            .headers()
+            .get("x-ratelimit-reset")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.parse::<i64>().ok());
+        if let (Some(rem), Some(reset)) = (remaining, reset_at) {
+            let _ = db.store_rate_limit("github", rem, reset).await;
+        }
     }
 
     fn api_url(&self, path: &str) -> String {
         format!("https://api.github.com{path}")
     }
 
-    fn add_auth_header(&self, builder: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+    fn add_auth_header(&self, builder: reqwest_middleware::RequestBuilder) -> reqwest_middleware::RequestBuilder {
         if let Some(token) = &self.token {
             builder.header("Authorization", format!("Bearer {token}"))
         } else {
@@ -38,6 +63,7 @@ impl ReleaseProvider for GitHubProvider {
         let builder = self.add_auth_header(builder);
 
         let response = builder.send().await?;
+        self.track_rate_limit(&response).await;
 
         let status = response.status();
         if status == 404 {
@@ -103,6 +129,7 @@ impl ReleaseProvider for GitHubProvider {
         let builder = self.add_auth_header(builder);
 
         let response = builder.send().await?;
+        self.track_rate_limit(&response).await;
 
         if response.status() == 403 {
             if let Some(limit) = response.headers().get("X-RateLimit-Remaining") {

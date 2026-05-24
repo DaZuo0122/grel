@@ -7,6 +7,7 @@ use sqlx::{Row, SqlitePool};
 use crate::models::{InstalledPackage, ManifestSource, PackageStatus};
 
 /// Database connection wrapper
+#[derive(Clone)]
 pub struct Database {
     pool: SqlitePool,
 }
@@ -186,6 +187,57 @@ impl Database {
             r#"
             CREATE INDEX IF NOT EXISTS idx_pkg_file_path
             ON package_files(file_path)
+            "#,
+        )
+        .execute(pool)
+        .await?;
+
+        // Create release metadata cache table
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS release_cache (
+                forge TEXT NOT NULL,
+                owner TEXT NOT NULL,
+                repo TEXT NOT NULL,
+                tag TEXT NOT NULL,
+                release_json TEXT NOT NULL,
+                cached_at INTEGER NOT NULL,
+                expires_at INTEGER NOT NULL,
+                PRIMARY KEY (forge, owner, repo, tag)
+            )
+            "#,
+        )
+        .execute(pool)
+        .await?;
+
+        // Create manifest content cache table
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS manifest_cache (
+                owner TEXT NOT NULL,
+                repo TEXT NOT NULL,
+                ref_name TEXT NOT NULL,
+                path TEXT NOT NULL,
+                content TEXT NOT NULL,
+                etag TEXT,
+                cached_at INTEGER NOT NULL,
+                expires_at INTEGER NOT NULL,
+                PRIMARY KEY (owner, repo, ref_name, path)
+            )
+            "#,
+        )
+        .execute(pool)
+        .await?;
+
+        // Create rate limit tracking table
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS rate_limit_cache (
+                provider TEXT NOT NULL PRIMARY KEY,
+                remaining INTEGER NOT NULL,
+                reset_at INTEGER NOT NULL,
+                last_checked INTEGER NOT NULL
+            )
             "#,
         )
         .execute(pool)
@@ -897,6 +949,48 @@ impl Database {
         Ok(result.rows_affected())
     }
 
+    /// Load all non-expired DNS cache entries.
+    pub async fn get_dns_cache(&self) -> Result<Vec<(String, String, i64, i64)>, DatabaseError> {
+        let rows = sqlx::query(
+            "SELECT hostname, ip_address, rtt_ms, expires_at FROM dns_cache WHERE expires_at >= strftime('%s', 'now')",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(|r| {
+                (
+                    r.get::<String, _>("hostname"),
+                    r.get::<String, _>("ip_address"),
+                    r.get::<i64, _>("rtt_ms"),
+                    r.get::<i64, _>("expires_at"),
+                )
+            })
+            .collect())
+    }
+
+    /// Store a single DNS cache entry.
+    pub async fn store_dns_entry(
+        &self,
+        hostname: &str,
+        ip_address: &str,
+        rtt_ms: i64,
+        expires_at: i64,
+    ) -> Result<(), DatabaseError> {
+        sqlx::query(
+            "INSERT OR REPLACE INTO dns_cache (hostname, ip_address, rtt_ms, expires_at) VALUES (?, ?, ?, ?)",
+        )
+        .bind(hostname)
+        .bind(ip_address)
+        .bind(rtt_ms)
+        .bind(expires_at)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
     /// Remove expired DNS cache entries.
     pub async fn clean_dns_cache(&self) -> Result<u64, DatabaseError> {
         let result = sqlx::query(
@@ -906,6 +1000,185 @@ impl Database {
         .await?;
 
         Ok(result.rows_affected())
+    }
+
+    // -----------------------------------------------------------------------
+    // Release metadata cache
+    // -----------------------------------------------------------------------
+
+    /// Load a cached release if it has not expired.
+    pub async fn get_release_cache(
+        &self,
+        forge: &str,
+        owner: &str,
+        repo: &str,
+        tag: &str,
+    ) -> Result<Option<String>, DatabaseError> {
+        let row = sqlx::query(
+            "SELECT release_json FROM release_cache WHERE forge = ? AND owner = ? AND repo = ? AND tag = ? AND expires_at >= strftime('%s', 'now')",
+        )
+        .bind(forge)
+        .bind(owner)
+        .bind(repo)
+        .bind(tag)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row.map(|r| r.get::<String, _>("release_json")))
+    }
+
+    /// Store a release in the cache with a given TTL (in seconds).
+    pub async fn store_release_cache(
+        &self,
+        forge: &str,
+        owner: &str,
+        repo: &str,
+        tag: &str,
+        release_json: &str,
+        ttl_secs: i64,
+    ) -> Result<(), DatabaseError> {
+        let now = chrono::Utc::now().timestamp();
+        sqlx::query(
+            "INSERT OR REPLACE INTO release_cache (forge, owner, repo, tag, release_json, cached_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(forge)
+        .bind(owner)
+        .bind(repo)
+        .bind(tag)
+        .bind(release_json)
+        .bind(now)
+        .bind(now + ttl_secs)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
+    /// Remove expired release cache entries.
+    pub async fn clean_release_cache(&self) -> Result<u64, DatabaseError> {
+        let result = sqlx::query(
+            "DELETE FROM release_cache WHERE expires_at < strftime('%s', 'now')",
+        )
+        .execute(&self.pool)
+        .await?;
+
+        Ok(result.rows_affected())
+    }
+
+    // -----------------------------------------------------------------------
+    // Manifest content cache
+    // -----------------------------------------------------------------------
+
+    /// Load a cached manifest if it has not expired.
+    pub async fn get_manifest_cache(
+        &self,
+        owner: &str,
+        repo: &str,
+        ref_name: &str,
+        path: &str,
+    ) -> Result<Option<(String, Option<String>)>, DatabaseError> {
+        let row = sqlx::query(
+            "SELECT content, etag FROM manifest_cache WHERE owner = ? AND repo = ? AND ref_name = ? AND path = ? AND expires_at >= strftime('%s', 'now')",
+        )
+        .bind(owner)
+        .bind(repo)
+        .bind(ref_name)
+        .bind(path)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row.map(|r| {
+            (
+                r.get::<String, _>("content"),
+                r.get::<Option<String>, _>("etag"),
+            )
+        }))
+    }
+
+    /// Store a manifest in the cache with a given TTL (in seconds).
+    pub async fn store_manifest_cache(
+        &self,
+        owner: &str,
+        repo: &str,
+        ref_name: &str,
+        path: &str,
+        content: &str,
+        etag: Option<&str>,
+        ttl_secs: i64,
+    ) -> Result<(), DatabaseError> {
+        let now = chrono::Utc::now().timestamp();
+        sqlx::query(
+            "INSERT OR REPLACE INTO manifest_cache (owner, repo, ref_name, path, content, etag, cached_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(owner)
+        .bind(repo)
+        .bind(ref_name)
+        .bind(path)
+        .bind(content)
+        .bind(etag)
+        .bind(now)
+        .bind(now + ttl_secs)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
+    /// Remove expired manifest cache entries.
+    pub async fn clean_manifest_cache(&self) -> Result<u64, DatabaseError> {
+        let result = sqlx::query(
+            "DELETE FROM manifest_cache WHERE expires_at < strftime('%s', 'now')",
+        )
+        .execute(&self.pool)
+        .await?;
+
+        Ok(result.rows_affected())
+    }
+
+    // -----------------------------------------------------------------------
+    // Rate limit tracking
+    // -----------------------------------------------------------------------
+
+    /// Load the most recent rate limit state for a provider.
+    pub async fn get_rate_limit(
+        &self,
+        provider: &str,
+    ) -> Result<Option<(i64, i64, i64)>, DatabaseError> {
+        let row = sqlx::query(
+            "SELECT remaining, reset_at, last_checked FROM rate_limit_cache WHERE provider = ?",
+        )
+        .bind(provider)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row.map(|r| {
+            (
+                r.get::<i64, _>("remaining"),
+                r.get::<i64, _>("reset_at"),
+                r.get::<i64, _>("last_checked"),
+            )
+        }))
+    }
+
+    /// Store rate limit state for a provider.
+    pub async fn store_rate_limit(
+        &self,
+        provider: &str,
+        remaining: i64,
+        reset_at: i64,
+    ) -> Result<(), DatabaseError> {
+        let now = chrono::Utc::now().timestamp();
+        sqlx::query(
+            "INSERT OR REPLACE INTO rate_limit_cache (provider, remaining, reset_at, last_checked) VALUES (?, ?, ?, ?)",
+        )
+        .bind(provider)
+        .bind(remaining)
+        .bind(reset_at)
+        .bind(now)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
     }
 
     /// Run SQLite PRAGMA integrity_check
@@ -1231,6 +1504,119 @@ mod tests {
             .await
             .unwrap();
         assert!(row.is_some());
+
+        db.close().await;
+    }
+
+    #[tokio::test]
+    async fn get_dns_cache_skips_expired_entries() {
+        let db = open_test_db().await;
+        let now = chrono::Utc::now().timestamp();
+
+        // Insert expired and valid entries
+        sqlx::query(
+            "INSERT OR REPLACE INTO dns_cache (hostname, ip_address, rtt_ms, expires_at) VALUES (?, ?, ?, ?)",
+        )
+        .bind("old.example.com")
+        .bind("1.2.3.4")
+        .bind(10i64)
+        .bind(now - 1)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "INSERT OR REPLACE INTO dns_cache (hostname, ip_address, rtt_ms, expires_at) VALUES (?, ?, ?, ?)",
+        )
+        .bind("new.example.com")
+        .bind("5.6.7.8")
+        .bind(20i64)
+        .bind(now + 300)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+
+        let entries = db.get_dns_cache().await.unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].0, "new.example.com");
+        assert_eq!(entries[0].1, "5.6.7.8");
+        assert_eq!(entries[0].2, 20);
+
+        db.close().await;
+    }
+
+    #[tokio::test]
+    async fn store_dns_entry_round_trip() {
+        let db = open_test_db().await;
+        let now = chrono::Utc::now().timestamp();
+
+        db.store_dns_entry("test.example.com", "9.8.7.6", 42, now + 300)
+            .await
+            .unwrap();
+
+        let entries = db.get_dns_cache().await.unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].0, "test.example.com");
+        assert_eq!(entries[0].1, "9.8.7.6");
+        assert_eq!(entries[0].2, 42);
+
+        db.close().await;
+    }
+
+    #[tokio::test]
+    async fn release_cache_round_trip() {
+        let db = open_test_db().await;
+
+        db.store_release_cache("github", "owner", "repo", "v1.0.0", r#"{"tag":"v1.0.0"}"#, 300)
+            .await
+            .unwrap();
+
+        let cached = db
+            .get_release_cache("github", "owner", "repo", "v1.0.0")
+            .await
+            .unwrap();
+        assert_eq!(cached, Some(r#"{"tag":"v1.0.0"}"#.to_string()));
+
+        // Expired entry should return None
+        db.store_release_cache("github", "owner", "repo", "old", "{}", -1)
+            .await
+            .unwrap();
+        let expired = db.get_release_cache("github", "owner", "repo", "old").await.unwrap();
+        assert_eq!(expired, None);
+
+        db.close().await;
+    }
+
+    #[tokio::test]
+    async fn manifest_cache_round_trip() {
+        let db = open_test_db().await;
+
+        db.store_manifest_cache("owner", "repo", "main", ".grel.toml", "[package]", Some("etag1"), 300)
+            .await
+            .unwrap();
+
+        let cached = db
+            .get_manifest_cache("owner", "repo", "main", ".grel.toml")
+            .await
+            .unwrap();
+        assert_eq!(cached, Some(("[package]".to_string(), Some("etag1".to_string()))));
+
+        db.close().await;
+    }
+
+    #[tokio::test]
+    async fn rate_limit_cache_round_trip() {
+        let db = open_test_db().await;
+
+        db.store_rate_limit("github", 42, 1234567890)
+            .await
+            .unwrap();
+
+        let cached = db.get_rate_limit("github").await.unwrap();
+        assert!(cached.is_some());
+        let (remaining, reset_at, _last_checked) = cached.unwrap();
+        assert_eq!(remaining, 42);
+        assert_eq!(reset_at, 1234567890);
 
         db.close().await;
     }

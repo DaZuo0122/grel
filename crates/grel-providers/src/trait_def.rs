@@ -6,7 +6,7 @@ use grel_core::{AssetTokens, RemoteAsset};
 use crate::github::GitHubRelease;
 
 /// A release from a git forge
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Release {
     pub tag: String,
     pub name: String,
@@ -27,7 +27,7 @@ pub struct SearchResult {
 }
 
 /// Type of provider
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ProviderType {
     GitHub,
     GitLab,
@@ -79,7 +79,10 @@ pub enum ProviderError {
     NotFound(String),
 
     #[error("HTTP error: {0}")]
-    HttpError(#[from] reqwest::Error),
+    HttpError(#[from] reqwest_middleware::Error),
+
+    #[error("Reqwest error: {0}")]
+    ReqwestError(#[from] reqwest::Error),
 
     #[error("API rate limit exceeded")]
     RateLimitExceeded,

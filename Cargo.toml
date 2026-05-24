@@ -37,6 +37,7 @@ tabled.workspace = true
 owo-colors.workspace = true
 chrono.workspace = true
 sha2.workspace = true
+serde_json.workspace = true
 
 [lints]
 workspace = true
@@ -85,8 +86,15 @@ owo-colors = "4"
 
 # Network & Proxy
 reqwest = { version = "0.12", features = ["rustls-tls", "json", "socks", "stream"] }
+reqwest-middleware = "0.3"
+reqwest-retry = "0.6.1"
 hickory-resolver = "0.24"
 dashmap = "6"
+wiremock = "0.6"
+
+# Cryptography
+pgp = "0.19"
+minisign-verify = "0.2"
 
 # Cache & Storage
 sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "sqlite"] }
@@ -108,6 +116,7 @@ regex = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"
+fastrand = "2"
 anyhow = "1"
 thiserror = "2"
 tracing = "0.1"

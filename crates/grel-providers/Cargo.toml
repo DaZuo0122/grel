@@ -9,9 +9,11 @@ description = "Git forge provider adapters for grel"
 [dependencies]
 grel-core = { path = "../grel-core" }
 grel-config = { path = "../grel-config" }
+grel-cache = { path = "../grel-cache" }
 
 async-trait.workspace = true
 reqwest.workspace = true
+reqwest-middleware.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 tracing.workspace = true

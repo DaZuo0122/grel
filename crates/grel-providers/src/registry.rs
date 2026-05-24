@@ -1,7 +1,7 @@
 //! Provider registry and factory.
 
 use grel_core::Forge;
-use reqwest::Client;
+use reqwest_middleware::ClientWithMiddleware;
 
 use crate::codeberg::CodebergProvider;
 use crate::gitea::GiteaProvider;
@@ -18,14 +18,26 @@ pub struct ProviderRegistry {
 }
 
 impl ProviderRegistry {
-    pub fn new(client: Client, github_token: Option<String>) -> Self {
+    pub fn new(
+        client: ClientWithMiddleware,
+        github_token: Option<String>,
+        db: Option<grel_cache::Database>,
+    ) -> Self {
         // For now, only GitHub token is used. Other forges could have their own env vars.
         let gitlab_token = std::env::var("GREL_GITLAB_TOKEN").ok();
         let gitea_token = std::env::var("GREL_GITEA_TOKEN").ok();
         let codeberg_token = std::env::var("GREL_CODEBERG_TOKEN").ok();
 
+        let github = {
+            let mut p = GitHubProvider::new(client.clone(), github_token);
+            if let Some(db) = db {
+                p = p.with_db(db);
+            }
+            Some(p)
+        };
+
         Self {
-            github: Some(GitHubProvider::new(client.clone(), github_token)),
+            github,
             gitlab: Some(GitLabProvider::new(client.clone(), gitlab_token)),
             gitea: Some(GiteaProvider::new(client.clone(), gitea_token)),
             codeberg: Some(CodebergProvider::new(client, codeberg_token)),

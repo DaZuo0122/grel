@@ -90,6 +90,27 @@ pub async fn cmd_db_clean(ctx: &CommandContext<'_>) -> Result<()> {
         Err(e) => eprintln!("  Warning: failed to clean DNS cache: {e}"),
     }
 
+    // Clean expired release cache
+    match db.clean_release_cache().await {
+        Ok(count) => println!("  Cleaned {count} expired release entries"),
+        Err(e) => eprintln!("  Warning: failed to clean release cache: {e}"),
+    }
+
+    // Clean expired manifest cache
+    match db.clean_manifest_cache().await {
+        Ok(count) => println!("  Cleaned {count} expired manifest entries"),
+        Err(e) => eprintln!("  Warning: failed to clean manifest cache: {e}"),
+    }
+
+    // Clean old content store entries (older than 30 days)
+    let content_store = grel_network::ContentStore::new(
+        ctx.config.paths.install_root.join("cache/downloads"),
+    );
+    match content_store.clean_old(30) {
+        Ok(count) => println!("  Cleaned {count} old content store entries"),
+        Err(e) => eprintln!("  Warning: failed to clean content store: {e}"),
+    }
+
     db.close().await;
     Ok(())
 }

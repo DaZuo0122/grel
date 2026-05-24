@@ -2,7 +2,7 @@
 //! Codeberg uses Forgejo (a Gitea fork), so the API is Gitea-compatible.
 
 use async_trait::async_trait;
-use reqwest::Client;
+use reqwest_middleware::ClientWithMiddleware;
 use serde::Deserialize;
 
 use crate::trait_def::{ProviderError, ProviderType, Release, ReleaseProvider, SearchResult};
@@ -13,12 +13,12 @@ const CODEBERG_API: &str = "https://codeberg.org/api/v1";
 
 /// Codeberg provider
 pub struct CodebergProvider {
-    client: Client,
+    client: ClientWithMiddleware,
     token: Option<String>,
 }
 
 impl CodebergProvider {
-    pub fn new(client: Client, token: Option<String>) -> Self {
+    pub fn new(client: ClientWithMiddleware, token: Option<String>) -> Self {
         Self { client, token }
     }
 
@@ -26,7 +26,7 @@ impl CodebergProvider {
         format!("{CODEBERG_API}{path}")
     }
 
-    fn add_auth_header(&self, builder: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+    fn add_auth_header(&self, builder: reqwest_middleware::RequestBuilder) -> reqwest_middleware::RequestBuilder {
         if let Some(token) = &self.token {
             builder.header("Authorization", format!("token {token}"))
         } else {

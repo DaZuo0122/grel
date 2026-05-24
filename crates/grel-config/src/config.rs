@@ -76,6 +76,26 @@ pub struct GeneralConfig {
     /// Keep downloaded archives after extraction (default: true)
     #[serde(default = "default_keep_archives")]
     pub keep_archives: bool,
+
+    /// Max retries for transient download failures (default: 3)
+    #[serde(default = "default_max_retries")]
+    pub max_retries: u32,
+
+    /// Base delay between retries in milliseconds (default: 1000)
+    #[serde(default = "default_retry_delay_ms")]
+    pub retry_delay_ms: u64,
+
+    /// Overall request timeout in seconds (default: 300)
+    #[serde(default = "default_timeout_secs")]
+    pub timeout_secs: u64,
+
+    /// TCP connect timeout in seconds (default: 30)
+    #[serde(default = "default_connect_timeout_secs")]
+    pub connect_timeout_secs: u64,
+
+    /// Max idle connections per host in the HTTP pool (default: 10)
+    #[serde(default = "default_pool_max_idle")]
+    pub pool_max_idle: usize,
 }
 
 impl Default for GeneralConfig {
@@ -85,6 +105,11 @@ impl Default for GeneralConfig {
             max_concurrent: default_max_concurrent(),
             proxy: String::new(),
             keep_archives: default_keep_archives(),
+            max_retries: default_max_retries(),
+            retry_delay_ms: default_retry_delay_ms(),
+            timeout_secs: default_timeout_secs(),
+            connect_timeout_secs: default_connect_timeout_secs(),
+            pool_max_idle: default_pool_max_idle(),
         }
     }
 }
@@ -99,6 +124,26 @@ fn default_max_concurrent() -> usize {
 
 fn default_keep_archives() -> bool {
     true
+}
+
+fn default_max_retries() -> u32 {
+    3
+}
+
+fn default_retry_delay_ms() -> u64 {
+    1000
+}
+
+fn default_timeout_secs() -> u64 {
+    300
+}
+
+fn default_connect_timeout_secs() -> u64 {
+    30
+}
+
+fn default_pool_max_idle() -> usize {
+    10
 }
 
 /// Asset resolution settings
@@ -303,23 +348,46 @@ pub struct SecurityConfig {
     #[serde(default = "default_verify_signatures")]
     pub verify_signatures: bool,
 
+    /// Verify upstream checksums on downloaded assets.
+    /// When true, grel will download and compare the published
+    /// checksum (sha256/sha512/md5) against the computed hash.
+    #[serde(default = "default_verify_checksums")]
+    pub verify_checksums: bool,
+
     /// Enable execution of manifest hooks (post_install / pre_remove).
     /// Disabled by default for security.
     #[serde(default = "default_enable_hooks")]
     pub enable_hooks: bool,
+
+    /// Trusted PGP public keys (ASCII-armored or binary, one per element).
+    /// Used to verify GPG detached signatures when verify_signatures is true.
+    #[serde(default)]
+    pub trusted_pgp_keys: Vec<String>,
+
+    /// Minisign public key (base64 encoded, e.g. "RWQf6LRCGA9i53ml...").
+    /// Used to verify minisign signatures when verify_signatures is true.
+    #[serde(default)]
+    pub minisign_public_key: Option<String>,
 }
 
 impl Default for SecurityConfig {
     fn default() -> Self {
         Self {
             verify_signatures: default_verify_signatures(),
+            verify_checksums: default_verify_checksums(),
             enable_hooks: default_enable_hooks(),
+            trusted_pgp_keys: Vec::new(),
+            minisign_public_key: None,
         }
     }
 }
 
 fn default_verify_signatures() -> bool {
     false
+}
+
+fn default_verify_checksums() -> bool {
+    true
 }
 
 fn default_enable_hooks() -> bool {

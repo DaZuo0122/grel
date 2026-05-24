@@ -6,8 +6,8 @@ use anyhow::{Context, Result};
 use grel_cache::{Database, models};
 use grel_config::Config;
 use grel_core::Forge;
-use grel_core::{Arch, Os, PackageRef, RemoteAsset, ResolverConfig};
-use grel_network::{Client, build_http_client};
+use grel_core::{Arch, ChecksumVerifier, Manifest, Os, PackageRef, RemoteAsset, ResolverConfig, SignatureVerifier};
+use grel_network::{Client, DnsCache, build_http_client};
 use grel_providers::ProviderRegistry;
 use owo_colors::OwoColorize;
 
@@ -95,6 +95,7 @@ async fn resolve_manifest(
     pkg_ref: &PackageRef,
     registry: &grel_core::Registry,
     provider: &dyn grel_providers::ReleaseProvider,
+    db: &grel_cache::Database,
 ) -> Option<(grel_core::Manifest, grel_cache::models::ManifestSource)> {
     // Tier 1: Central registry
     if registry.is_available() {
@@ -106,21 +107,58 @@ async fn resolve_manifest(
         }
     }
 
-    // Tier 2: In-repo .grel.toml
+    // Tier 2: In-repo .grel.toml (with caching)
     for branch in &["main", "master", "HEAD"] {
+        // Check cache first
+        if let Ok(Some((content, _etag))) = db
+            .get_manifest_cache(&pkg_ref.owner, &pkg_ref.repo, branch, ".grel.toml")
+            .await
+        {
+            match grel_core::Manifest::load_from_str(&content) {
+                Ok(manifest) => {
+                    tracing::debug!(
+                        "Found cached in-repo manifest for {}",
+                        pkg_ref.to_short_ref()
+                    );
+                    return Some((manifest, grel_cache::models::ManifestSource::InRepo));
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "Invalid cached .grel.toml in {}: {}",
+                        pkg_ref.to_short_ref(),
+                        e
+                    );
+                }
+            }
+        }
+
         match provider
             .fetch_raw_file(&pkg_ref.owner, &pkg_ref.repo, ".grel.toml", branch)
             .await
         {
-            Ok(content) => match grel_core::Manifest::load_from_str(&content) {
-                Ok(manifest) => {
-                    tracing::debug!("Found in-repo manifest for {}", pkg_ref.to_short_ref());
-                    return Some((manifest, grel_cache::models::ManifestSource::InRepo));
+            Ok(content) => {
+                // Store in cache (best-effort)
+                let _ = db
+                    .store_manifest_cache(
+                        &pkg_ref.owner,
+                        &pkg_ref.repo,
+                        branch,
+                        ".grel.toml",
+                        &content,
+                        None,
+                        3600,
+                    )
+                    .await;
+                match grel_core::Manifest::load_from_str(&content) {
+                    Ok(manifest) => {
+                        tracing::debug!("Found in-repo manifest for {}", pkg_ref.to_short_ref());
+                        return Some((manifest, grel_cache::models::ManifestSource::InRepo));
+                    }
+                    Err(e) => {
+                        tracing::warn!("Invalid .grel.toml in {}: {}", pkg_ref.to_short_ref(), e);
+                    }
                 }
-                Err(e) => {
-                    tracing::warn!("Invalid .grel.toml in {}: {}", pkg_ref.to_short_ref(), e);
-                }
-            },
+            }
             Err(grel_providers::ProviderError::NotFound(_)) => continue,
             Err(e) => {
                 tracing::debug!(
@@ -133,6 +171,87 @@ async fn resolve_manifest(
     }
 
     None
+}
+
+/// Fetch a release with caching.
+///
+/// Checks the database cache first; on miss fetches from the provider and stores
+/// the result.  TTL is 5 minutes for `latest` and 1 hour for pinned tags.
+async fn fetch_release_with_cache(
+    db: &grel_cache::Database,
+    provider: &dyn grel_providers::ReleaseProvider,
+    forge: &str,
+    owner: &str,
+    repo: &str,
+    tag: Option<&str>,
+) -> Result<grel_providers::Release, grel_providers::ProviderError> {
+    let cache_tag = tag.unwrap_or("latest");
+    let ttl_secs = if tag.is_some() { 3600 } else { 300 };
+
+    // Try cache first
+    if let Ok(Some(json)) = db
+        .get_release_cache(forge, owner, repo, cache_tag)
+        .await {
+        match serde_json::from_str::<grel_providers::Release>(&json) {
+            Ok(release) => {
+                tracing::debug!("Release cache hit for {}/{}/{}", forge, owner, repo);
+                return Ok(release);
+            }
+            Err(e) => {
+                tracing::warn!("Failed to deserialize cached release for {}/{}/{}: {}", forge, owner, repo, e);
+            }
+        }
+    }
+
+    // Fetch from provider
+    let release = if let Some(t) = tag {
+        provider.get_release(owner, repo, t).await
+    } else {
+        provider.latest_release(owner, repo).await
+    };
+
+    if let Ok(ref r) = release {
+        // Store in cache (best-effort)
+        if let Ok(json) = serde_json::to_string(r) {
+            let _ = db
+                .store_release_cache(forge, owner, repo, cache_tag, &json, ttl_secs)
+                .await;
+        }
+    }
+
+    release
+}
+
+/// Check whether a package should be skipped because it is already up-to-date.
+/// Check rate limit state for a provider and warn if we're near the limit.
+async fn check_rate_limit(db: &grel_cache::Database, provider: &str) {
+    match db.get_rate_limit(provider).await {
+        Ok(Some((remaining, reset_at, _last_checked))) => {
+            let now = chrono::Utc::now().timestamp();
+            if remaining <= 0 && reset_at > now {
+                let wait_secs = reset_at - now;
+                eprintln!(
+                    "{}",
+                    format!(
+                        "Warning: {} rate limit exceeded. Reset in {} seconds.",
+                        provider, wait_secs
+                    )
+                    .yellow()
+                );
+            } else if remaining < 10 {
+                eprintln!(
+                    "{}",
+                    format!(
+                        "Warning: {} rate limit low ({} requests remaining).",
+                        provider, remaining
+                    )
+                    .yellow()
+                );
+            }
+        }
+        Ok(None) => {}
+        Err(e) => tracing::warn!("Failed to check rate limit for {}: {}", provider, e),
+    }
 }
 
 /// Check whether a package should be skipped because it is already up-to-date.
@@ -182,6 +301,169 @@ pub(crate) fn run_hook(hook: &str, install_dir: &std::path::Path, label: &str) {
             format!("Failed to run {label} hook: {e}").yellow()
         ),
     }
+}
+
+/// Download and parse the upstream checksum file for an asset.
+/// Returns `Some(expected_hash)` when verification is enabled and a checksum file is found.
+async fn fetch_expected_checksum(
+    client: &Client,
+    release: &grel_providers::Release,
+    asset: &RemoteAsset,
+    config: &Config,
+    manifest: Option<&Manifest>,
+) -> Result<Option<String>, anyhow::Error> {
+    if !config.security.verify_checksums {
+        return Ok(None);
+    }
+
+    let Some((checksum_asset, _algo)) =
+        ChecksumVerifier::find_checksum_asset(&release.assets, asset, manifest)
+    else {
+        return Err(anyhow::anyhow!(
+            "Checksum verification enabled but no checksum file found for {}",
+            asset.filename
+        ));
+    };
+
+    println!(
+        "  {}",
+        format!("Verifying checksum from {}", checksum_asset.filename)
+            .dimmed()
+    );
+
+    let temp_path = std::env::temp_dir().join(&checksum_asset.filename);
+    let (_, _) = grel_network::download::download_file(
+        client,
+        &checksum_asset.url,
+        &temp_path,
+        None,
+        false,
+        None,
+    )
+    .await
+    .with_context(|| {
+        format!(
+            "Failed to download checksum file {}",
+            checksum_asset.filename
+        )
+    })?;
+
+    let content = tokio::fs::read_to_string(&temp_path)
+        .await
+        .with_context(|| {
+            format!(
+                "Failed to read checksum file {}",
+                temp_path.display()
+            )
+        })?;
+
+    tokio::fs::remove_file(&temp_path).await.ok();
+
+    let expected = ChecksumVerifier::parse_checksum(&content, &asset.filename)
+        .with_context(|| {
+            format!(
+                "Failed to parse checksum file {}",
+                checksum_asset.filename
+            )
+        })?;
+
+    Ok(Some(expected))
+}
+
+/// Verify a downloaded archive against an expected checksum.
+/// On mismatch, deletes the archive and returns an error.
+fn verify_checksum_or_clean(
+    computed: &str,
+    expected: &str,
+    archive_path: &std::path::Path,
+    filename: &str,
+) -> Result<(), anyhow::Error> {
+    if let Err(e) = ChecksumVerifier::verify(computed, expected) {
+        std::fs::remove_file(archive_path).ok();
+        return Err(anyhow::anyhow!(
+            "Checksum verification failed for {}: {}",
+            filename,
+            e
+        ));
+    }
+    println!("  {}", "Checksum verified".dimmed());
+    Ok(())
+}
+
+/// Download a signature file and cryptographically verify `archive_path`.
+async fn verify_signature_for_asset(
+    client: &Client,
+    release: &grel_providers::Release,
+    asset: &RemoteAsset,
+    archive_path: &std::path::Path,
+    security: &grel_config::SecurityConfig,
+    manifest: Option<&grel_core::Manifest>,
+) -> Result<(), anyhow::Error> {
+    let Some((sig_asset, kind)) =
+        SignatureVerifier::find_signature_asset(&release.assets, asset, manifest)
+    else {
+        return Err(anyhow::anyhow!(
+            "No signature file found for {}",
+            asset.filename
+        ));
+    };
+
+    println!(
+        "  {}",
+        format!("Verifying signature from {}", sig_asset.filename)
+            .dimmed()
+    );
+
+    // Download signature file to temp
+    let sig_temp = std::env::temp_dir().join(&sig_asset.filename);
+    let (_, _) = grel_network::download::download_file(
+        client,
+        &sig_asset.url,
+        &sig_temp,
+        None,
+        false,
+        None,
+    )
+    .await
+    .with_context(|| {
+        format!(
+            "Failed to download signature {}",
+            sig_asset.filename
+        )
+    })?;
+
+    let sig_bytes = tokio::fs::read(&sig_temp).await?;
+    tokio::fs::remove_file(&sig_temp).await.ok();
+
+    // Read the message (downloaded archive)
+    let message_bytes = tokio::fs::read(archive_path).await?;
+
+    match kind {
+        grel_core::SignatureKind::GpgAsc | grel_core::SignatureKind::GpgBinary => {
+            if security.trusted_pgp_keys.is_empty() {
+                return Err(anyhow::anyhow!(
+                    "Signature verification requires trusted_pgp_keys in config"
+                ));
+            }
+            SignatureVerifier::verify_gpg(
+                &sig_bytes,
+                &message_bytes,
+                &security.trusted_pgp_keys,
+            )
+            .with_context(|| "GPG signature verification failed")?;
+        }
+        grel_core::SignatureKind::Minisign => {
+            let Some(ref pk) = security.minisign_public_key else {
+                return Err(anyhow::anyhow!(
+                    "Minisign signature verification requires minisign_public_key in config"
+                ));
+            };
+            SignatureVerifier::verify_minisign(&sig_bytes, &message_bytes, pk)
+                .with_context(|| "Minisign signature verification failed")?;
+        }
+    }
+
+    Ok(())
 }
 
 /// Clean stale archives under a managed package directory.
@@ -247,9 +529,15 @@ async fn install_single_package(
 
     let release = if let Some(ref tag) = pkg_ref.version {
         println!("  Pinning to version {tag}");
-        match provider
-            .get_release(&pkg_ref.owner, &pkg_ref.repo, tag)
-            .await
+        match fetch_release_with_cache(
+            db,
+            provider,
+            &pkg_ref.forge.to_string(),
+            &pkg_ref.owner,
+            &pkg_ref.repo,
+            Some(tag),
+        )
+        .await
         {
             Ok(r) => r,
             Err(grel_providers::ProviderError::NotFound(e)) => {
@@ -265,7 +553,16 @@ async fn install_single_package(
             }
         }
     } else {
-        match provider.latest_release(&pkg_ref.owner, &pkg_ref.repo).await {
+        match fetch_release_with_cache(
+            db,
+            provider,
+            &pkg_ref.forge.to_string(),
+            &pkg_ref.owner,
+            &pkg_ref.repo,
+            None,
+        )
+        .await
+        {
             Ok(r) => r,
             Err(grel_providers::ProviderError::NotFound(e)) => {
                 return Err(anyhow::anyhow!("Package not found: {e}"));
@@ -297,7 +594,7 @@ async fn install_single_package(
 
     let remote_assets: Vec<RemoteAsset> = release.assets.clone();
 
-    let manifest = resolve_manifest(pkg_ref, local_registry, provider).await;
+    let manifest = resolve_manifest(pkg_ref, local_registry, provider, db).await;
     let manifest_source = manifest
         .as_ref()
         .map(|(_, s)| s.clone())
@@ -354,6 +651,22 @@ async fn install_single_package(
             }
         }
     };
+
+    // Fail-fast if signature verification is enabled but no signature file is available
+    if config.security.verify_signatures {
+        if SignatureVerifier::find_signature_asset(
+            &release.assets,
+            &chosen_asset,
+            manifest.as_ref().map(|(m, _)| m),
+        )
+        .is_none()
+        {
+            return Err(anyhow::anyhow!(
+                "Signature verification enabled but no signature file found for {}",
+                chosen_asset.filename
+            ));
+        }
+    }
 
     let is_managed = if download_only {
         false
@@ -415,10 +728,65 @@ async fn install_single_package(
         format_size(chosen_asset.size_bytes.unwrap_or(0))
     );
 
-    let checksum =
-        grel_network::download::download_file(client, &chosen_asset.url, &archive_path, None)
-            .await
-            .with_context(|| format!("Failed to download {}", chosen_asset.filename))?;
+    // Download checksum file if verification is enabled
+    let expected_checksum = fetch_expected_checksum(
+        client,
+        &release,
+        &chosen_asset,
+        config,
+        manifest.as_ref().map(|(m, _)| m),
+    )
+    .await?;
+
+    // Check for cached ETag
+    let cached_etag = db.get_etag(&chosen_asset.url).await.ok().flatten();
+
+    let content_store =
+        grel_network::ContentStore::new(config.paths.install_root.join("cache/downloads"));
+    let (checksum, response_etag) = grel_network::download::download_file_with_store(
+        client,
+        &chosen_asset.url,
+        &archive_path,
+        None,
+        true,
+        cached_etag.as_deref(),
+        Some(&content_store),
+        expected_checksum.as_deref(),
+    )
+    .await
+    .with_context(|| format!("Failed to download {}", chosen_asset.filename))?;
+
+    // Verify checksum
+    if let Some(expected) = expected_checksum {
+        verify_checksum_or_clean(&checksum, &expected, &archive_path, &chosen_asset.filename)?;
+    }
+
+    // Verify cryptographic signature
+    if config.security.verify_signatures {
+        if let Err(e) = verify_signature_for_asset(
+            client,
+            &release,
+            &chosen_asset,
+            &archive_path,
+            &config.security,
+            manifest.as_ref().map(|(m, _)| m),
+        )
+        .await
+        {
+            std::fs::remove_file(&archive_path).ok();
+            return Err(anyhow::anyhow!(
+                "Signature verification failed for {}: {}",
+                chosen_asset.filename,
+                e
+            ));
+        }
+        println!("  {}", "Signature verified".dimmed());
+    }
+
+    // Store ETag for future conditional requests
+    if let Some(etag) = response_etag {
+        db.store_etag(&chosen_asset.url, &etag).await.ok();
+    }
 
     let installed_binaries = if is_managed {
         match grel_network::archive::install_asset(
@@ -796,9 +1164,17 @@ pub async fn cmd_sync(ctx: &CommandContext<'_>, packages: &[String]) -> Result<(
     println!("{}", "Resolving packages...".bold());
 
     let db = ctx.db().await?;
-    let client = build_http_client(&ctx.config.general)?;
+    let dns_cache = DnsCache::new(300).with_db(db.clone());
+    let _ = dns_cache.load_from_db().await;
+    // Prime DNS cache for common API hostnames
+    for hostname in ["api.github.com", "gitlab.com", "gitea.com", "codeberg.org"] {
+        let _ = dns_cache.resolve(hostname).await;
+    }
+    let client = build_http_client(&ctx.config.general, Some(&dns_cache))?;
     let github_token = std::env::var("GREL_GITHUB_TOKEN").ok();
-    let provider_registry = ProviderRegistry::new(client.clone(), github_token);
+    let provider_registry = ProviderRegistry::new(client.clone(), github_token, Some(db.clone()));
+
+    check_rate_limit(&db, "github").await;
 
     let local_registry = grel_core::Registry::new(ctx.config.paths.install_root.join("registry"));
     if ctx.config.registry.auto_update && !ctx.config.registry.url.is_empty() {
@@ -835,10 +1211,16 @@ pub async fn cmd_sync(ctx: &CommandContext<'_>, packages: &[String]) -> Result<(
     let allow_keyword = ctx.cli.allow_keyword();
     let noconfirm = ctx.cli.noconfirm;
 
+    if !ctx.config.security.verify_checksums {
+        eprintln!(
+            "{}",
+            "Warning: Checksum verification is disabled. Set security.verify_checksums = true in your config.".yellow()
+        );
+    }
     if !ctx.config.security.verify_signatures {
         eprintln!(
             "{}",
-            "Warning: Signature verification is disabled. Install at your own risk.".yellow()
+            "Warning: Signature verification is disabled. Set security.verify_signatures = true in your config.".yellow()
         );
     }
 
@@ -854,9 +1236,15 @@ pub async fn cmd_sync(ctx: &CommandContext<'_>, packages: &[String]) -> Result<(
 
         let release = if let Some(ref tag) = pkg_ref.version {
             println!("  Pinning to version {tag}");
-            match provider
-                .get_release(&pkg_ref.owner, &pkg_ref.repo, tag)
-                .await
+            match fetch_release_with_cache(
+                &db,
+                provider,
+                &pkg_ref.forge.to_string(),
+                &pkg_ref.owner,
+                &pkg_ref.repo,
+                Some(tag),
+            )
+            .await
             {
                 Ok(r) => r,
                 Err(grel_providers::ProviderError::NotFound(e)) => {
@@ -876,7 +1264,16 @@ pub async fn cmd_sync(ctx: &CommandContext<'_>, packages: &[String]) -> Result<(
                 }
             }
         } else {
-            match provider.latest_release(&pkg_ref.owner, &pkg_ref.repo).await {
+            match fetch_release_with_cache(
+                &db,
+                provider,
+                &pkg_ref.forge.to_string(),
+                &pkg_ref.owner,
+                &pkg_ref.repo,
+                None,
+            )
+            .await
+            {
                 Ok(r) => r,
                 Err(grel_providers::ProviderError::NotFound(e)) => {
                     eprintln!("{}", format!("Package not found: {e}").red());
@@ -912,7 +1309,7 @@ pub async fn cmd_sync(ctx: &CommandContext<'_>, packages: &[String]) -> Result<(
 
         let remote_assets: Vec<RemoteAsset> = release.assets.clone();
 
-        let manifest = resolve_manifest(&pkg_ref, &local_registry, provider).await;
+        let manifest = resolve_manifest(&pkg_ref, &local_registry, provider, &db).await;
         let manifest_source = manifest
             .as_ref()
             .map(|(_, s)| s.clone())
@@ -1016,12 +1413,15 @@ pub async fn cmd_sync(ctx: &CommandContext<'_>, packages: &[String]) -> Result<(
             }
         };
 
-        // Signature verification enforcement
+        // Check if a signature file is available (fail-fast before download)
         if ctx.config.security.verify_signatures {
-            let sig_name = format!("{}.sig", chosen_asset.filename);
-            let asc_name = format!("{}.asc", chosen_asset.filename);
-            let has_sig = release.assets.iter().any(|a| a.filename == sig_name || a.filename == asc_name);
-            if !has_sig {
+            if SignatureVerifier::find_signature_asset(
+                &release.assets,
+                &chosen_asset,
+                manifest.as_ref().map(|(m, _)| m),
+            )
+            .is_none()
+            {
                 eprintln!(
                     "  {}",
                     format!(
@@ -1032,10 +1432,6 @@ pub async fn cmd_sync(ctx: &CommandContext<'_>, packages: &[String]) -> Result<(
                 );
                 continue;
             }
-            println!(
-                "  {}",
-                format!("Signature file found for {}", chosen_asset.filename).dimmed()
-            );
         }
 
         let is_managed = if ctx.cli.download_only {
@@ -1095,10 +1491,65 @@ pub async fn cmd_sync(ctx: &CommandContext<'_>, packages: &[String]) -> Result<(
             format_size(chosen_asset.size_bytes.unwrap_or(0))
         );
 
-        let checksum =
-            grel_network::download::download_file(&client, &chosen_asset.url, &archive_path, None)
-                .await
-                .with_context(|| format!("Failed to download {}", chosen_asset.filename))?;
+        // Download checksum file if verification is enabled
+        let expected_checksum = fetch_expected_checksum(
+            &client,
+            &release,
+            &chosen_asset,
+            &ctx.config,
+            manifest.as_ref().map(|(m, _)| m),
+        )
+        .await?;
+
+        // Check for cached ETag
+        let cached_etag = db.get_etag(&chosen_asset.url).await.ok().flatten();
+
+        let content_store =
+            grel_network::ContentStore::new(ctx.config.paths.install_root.join("cache/downloads"));
+        let (checksum, response_etag) = grel_network::download::download_file_with_store(
+            &client,
+            &chosen_asset.url,
+            &archive_path,
+            None,
+            true,
+            cached_etag.as_deref(),
+            Some(&content_store),
+            expected_checksum.as_deref(),
+        )
+        .await
+        .with_context(|| format!("Failed to download {}", chosen_asset.filename))?;
+
+        // Verify checksum
+        if let Some(expected) = expected_checksum {
+            verify_checksum_or_clean(&checksum, &expected, &archive_path, &chosen_asset.filename)?;
+        }
+
+        // Verify cryptographic signature
+        if ctx.config.security.verify_signatures {
+            if let Err(e) = verify_signature_for_asset(
+                &client,
+                &release,
+                &chosen_asset,
+                &archive_path,
+                &ctx.config.security,
+                manifest.as_ref().map(|(m, _)| m),
+            )
+            .await
+            {
+                std::fs::remove_file(&archive_path).ok();
+                return Err(anyhow::anyhow!(
+                    "Signature verification failed for {}: {}",
+                    chosen_asset.filename,
+                    e
+                ));
+            }
+            println!("  {}", "Signature verified".dimmed());
+        }
+
+        // Store ETag for future conditional requests
+        if let Some(etag) = response_etag {
+            db.store_etag(&chosen_asset.url, &etag).await.ok();
+        }
 
         let installed_binaries = if is_managed {
             match grel_network::archive::install_asset(
@@ -1322,9 +1773,15 @@ pub async fn cmd_search(
         format!("Searching for \"{pattern}\" on {}...", ctx.default_forge()).bold()
     );
 
-    let client = build_http_client(&ctx.config.general)?;
+    let db = ctx.db().await?;
+    let dns_cache = DnsCache::new(300).with_db(db.clone());
+    let _ = dns_cache.load_from_db().await;
+    for hostname in ["api.github.com", "gitlab.com", "gitea.com", "codeberg.org"] {
+        let _ = dns_cache.resolve(hostname).await;
+    }
+    let client = build_http_client(&ctx.config.general, Some(&dns_cache))?;
     let github_token = std::env::var("GREL_GITHUB_TOKEN").ok();
-    let provider_registry = ProviderRegistry::new(client, github_token);
+    let provider_registry = ProviderRegistry::new(client, github_token, Some(db.clone()));
 
     let provider = provider_registry
         .get_provider(&ctx.default_forge())
@@ -1383,9 +1840,16 @@ pub async fn cmd_sync_refresh(ctx: &CommandContext<'_>) -> Result<()> {
         return Ok(());
     }
 
-    let client = build_http_client(&ctx.config.general)?;
+    let dns_cache = DnsCache::new(300).with_db(db.clone());
+    let _ = dns_cache.load_from_db().await;
+    for hostname in ["api.github.com", "gitlab.com", "gitea.com", "codeberg.org"] {
+        let _ = dns_cache.resolve(hostname).await;
+    }
+    let client = build_http_client(&ctx.config.general, Some(&dns_cache))?;
     let github_token = std::env::var("GREL_GITHUB_TOKEN").ok();
-    let registry = ProviderRegistry::new(client, github_token);
+    let registry = ProviderRegistry::new(client, github_token, Some(db.clone()));
+
+    check_rate_limit(&db, "github").await;
 
     let mut up_to_date = 0;
     let mut available_updates = 0;
@@ -1415,7 +1879,16 @@ pub async fn cmd_sync_refresh(ctx: &CommandContext<'_>) -> Result<()> {
             }
         };
 
-        match provider.latest_release(&pkg.owner, &pkg.repo).await {
+        match fetch_release_with_cache(
+            &db,
+            provider,
+            &forge.to_string(),
+            &pkg.owner,
+            &pkg.repo,
+            None,
+        )
+        .await
+        {
             Ok(release) => {
                 if let Some(id) = pkg.id {
                     db.update_last_checked(id).await.ok();
@@ -1549,9 +2022,16 @@ pub async fn cmd_upgrade(ctx: &CommandContext<'_>) -> Result<()> {
         return Ok(());
     }
 
-    let client = build_http_client(&ctx.config.general)?;
+    let dns_cache = DnsCache::new(300).with_db(db.clone());
+    let _ = dns_cache.load_from_db().await;
+    for hostname in ["api.github.com", "gitlab.com", "gitea.com", "codeberg.org"] {
+        let _ = dns_cache.resolve(hostname).await;
+    }
+    let client = build_http_client(&ctx.config.general, Some(&dns_cache))?;
     let github_token = std::env::var("GREL_GITHUB_TOKEN").ok();
-    let registry = ProviderRegistry::new(client.clone(), github_token);
+    let registry = ProviderRegistry::new(client.clone(), github_token, Some(db.clone()));
+
+    check_rate_limit(&db, "github").await;
 
     let host_os = Os::host();
     let host_arch = Arch::host();
@@ -1596,7 +2076,16 @@ pub async fn cmd_upgrade(ctx: &CommandContext<'_>) -> Result<()> {
             }
         }
 
-        let release = match provider.latest_release(&pkg.owner, &pkg.repo).await {
+        let release = match fetch_release_with_cache(
+            &db,
+            provider,
+            &pkg.forge,
+            &pkg.owner,
+            &pkg.repo,
+            None,
+        )
+        .await
+        {
             Ok(r) => r,
             Err(grel_providers::ProviderError::NotFound(_)) => {
                 if let Some(id) = pkg.id {
@@ -1819,10 +2308,29 @@ async fn upgrade_single_package(
         config.paths.download_dir.clone()
     };
 
-    if !config.security.verify_signatures {
+    if config.security.verify_signatures {
+        if SignatureVerifier::find_signature_asset(
+            &release.assets,
+            &asset,
+            None, // Upgrade path does not currently resolve manifests
+        )
+        .is_none()
+        {
+            return Err(anyhow::anyhow!(
+                "Signature verification enabled but no signature file found for {}",
+                asset.filename
+            ));
+        }
+    } else {
         eprintln!(
             "{}",
-            "Warning: Signature verification is disabled. Install at your own risk.".yellow()
+            "Warning: Signature verification is disabled. Set security.verify_signatures = true in your config.".yellow()
+        );
+    }
+    if !config.security.verify_checksums {
+        eprintln!(
+            "{}",
+            "Warning: Checksum verification is disabled. Set security.verify_checksums = true in your config.".yellow()
         );
     }
 
@@ -1831,10 +2339,66 @@ async fn upgrade_single_package(
     std::fs::create_dir_all(&install_dir)
         .map_err(|e| anyhow::anyhow!("Failed to create directory: {e}"))?;
 
+    // Download checksum file if verification is enabled
+    let expected_checksum = fetch_expected_checksum(
+        client,
+        &release,
+        &asset,
+        config,
+        None, // Upgrade path does not currently resolve manifests
+    )
+    .await?;
+
     let temp_path = archive_path.with_extension("part");
-    let checksum = grel_network::download::download_file(client, &asset.url, &temp_path, None)
+    // Check for cached ETag
+    let cached_etag = db.get_etag(&asset.url).await.ok().flatten();
+
+    let content_store =
+        grel_network::ContentStore::new(config.paths.install_root.join("cache/downloads"));
+    let (checksum, response_etag) = grel_network::download::download_file_with_store(
+        client,
+        &asset.url,
+        &temp_path,
+        None,
+        true,
+        cached_etag.as_deref(),
+        Some(&content_store),
+        expected_checksum.as_deref(),
+    )
+    .await
+    .with_context(|| format!("Failed to download {}", asset.filename))?;
+
+    // Verify checksum
+    if let Some(expected) = expected_checksum {
+        verify_checksum_or_clean(&checksum, &expected, &temp_path, &asset.filename)?;
+    }
+
+    // Verify cryptographic signature
+    if config.security.verify_signatures {
+        if let Err(e) = verify_signature_for_asset(
+            client,
+            &release,
+            &asset,
+            &temp_path,
+            &config.security,
+            None, // Upgrade path does not currently resolve manifests
+        )
         .await
-        .with_context(|| format!("Failed to download {}", asset.filename))?;
+        {
+            std::fs::remove_file(&temp_path).ok();
+            return Err(anyhow::anyhow!(
+                "Signature verification failed for {}: {}",
+                asset.filename,
+                e
+            ));
+        }
+        println!("  {}", "Signature verified".dimmed());
+    }
+
+    // Store ETag for future conditional requests
+    if let Some(etag) = response_etag {
+        db.store_etag(&asset.url, &etag).await.ok();
+    }
 
     std::fs::rename(&temp_path, &archive_path)
         .map_err(|e| anyhow::anyhow!("Failed to rename downloaded file: {e}"))?;

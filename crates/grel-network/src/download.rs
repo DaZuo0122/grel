@@ -1,22 +1,75 @@
 //! Parallel download functionality.
 
 use std::path::Path;
+use std::time::Duration;
 
 use futures::stream::{self, StreamExt};
 use indicatif::ProgressBar;
-use reqwest::Client;
+use crate::Client;
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt;
 
-use crate::NetworkError;
+use crate::{ContentStore, NetworkError};
+
+/// Download a single file with optional content-addressed caching.
+///
+/// If `content_store` and `expected_sha256` are provided and the store already
+/// contains the expected hash, the download is skipped and a link/copy from the
+/// store to `dest` is created.
+///
+/// After a successful download the file is copied into the content store so that
+/// future requests for the same hash can be served from cache.
+pub async fn download_file_with_store(
+    client: &Client,
+    url: &str,
+    dest: &Path,
+    progress_bar: Option<&ProgressBar>,
+    resume: bool,
+    etag: Option<&str>,
+    content_store: Option<&ContentStore>,
+    expected_sha256: Option<&str>,
+) -> Result<(String, Option<String>), NetworkError> {
+    // Cache hit — skip the network entirely
+    if let (Some(store), Some(expected)) = (content_store, expected_sha256) {
+        if store.contains(expected) {
+            return match store.link_to(expected, dest) {
+                Ok(()) => Ok((expected.to_string(), None)),
+                Err(e) => Err(NetworkError::OperationFailed(format!(
+                    "Failed to link from content store: {e}"
+                ))),
+            };
+        }
+    }
+
+    let result = download_file(client, url, dest, progress_bar, resume, etag).await?;
+
+    // Store in content cache for future reuse (best-effort)
+    if let Some(store) = content_store {
+        let (checksum, _) = &result;
+        if let Err(e) = store.insert_from_path(dest, checksum) {
+            tracing::warn!("Failed to insert download into content store: {}", e);
+        }
+    }
+
+    Ok(result)
+}
 
 /// Download a single file
+///
+/// Supports resuming partial downloads when `resume = true` and the destination
+/// file already exists. On 304 Not Modified (when ETag is provided), skips the
+/// download and returns the cached checksum if available.
+///
+/// Returns `(checksum, etag)` where `etag` is the ETag from the response headers
+/// (or `None` if the server did not send one).
 pub async fn download_file(
     client: &Client,
     url: &str,
     dest: &Path,
     progress_bar: Option<&ProgressBar>,
-) -> Result<String, NetworkError> {
+    resume: bool,
+    etag: Option<&str>,
+) -> Result<(String, Option<String>), NetworkError> {
     // Create parent directory
     if let Some(parent) = dest.parent() {
         tokio::fs::create_dir_all(parent).await.map_err(|e| {
@@ -24,27 +77,93 @@ pub async fn download_file(
         })?;
     }
 
-    // Start download
-    let response = client.get(url).send().await?;
+    // Build request
+    let mut request = client.get(url);
+
+    // Add If-None-Match if we have a cached ETag
+    if let Some(etag_value) = etag {
+        request = request.header("If-None-Match", etag_value);
+    }
+
+    // Handle resume
+    let existing_len = if resume {
+        match tokio::fs::metadata(dest).await {
+            Ok(meta) => meta.len(),
+            Err(_) => 0,
+        }
+    } else {
+        0
+    };
+
+    if resume && existing_len > 0 {
+        request = request.header("Range", format!("bytes={}-", existing_len));
+    }
+
+    let response = request.send().await?;
+    let status = response.status();
+
+    // Extract ETag from response headers before consuming body
+    let response_etag = response
+        .headers()
+        .get("etag")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+
+    // 304 Not Modified — nothing to download
+    if status == reqwest::StatusCode::NOT_MODIFIED {
+        // Re-read the existing file and compute its checksum
+        let content = tokio::fs::read(dest)
+            .await
+            .map_err(|e| NetworkError::OperationFailed(format!("Failed to read cached file: {e}")))?;
+        let mut hasher = Sha256::new();
+        hasher.update(&content);
+        return Ok((format!("{:x}", hasher.finalize()), response_etag));
+    }
+
+    // 416 Range Not Satisfiable — file is already complete
+    if status == reqwest::StatusCode::RANGE_NOT_SATISFIABLE {
+        let content = tokio::fs::read(dest)
+            .await
+            .map_err(|e| NetworkError::OperationFailed(format!("Failed to read file: {e}")))?;
+        let mut hasher = Sha256::new();
+        hasher.update(&content);
+        return Ok((format!("{:x}", hasher.finalize()), response_etag));
+    }
+
+    // Check for other errors
+    if !status.is_success() {
+        return Err(NetworkError::OperationFailed(format!(
+            "HTTP {status} for {url}"
+        )));
+    }
+
+    let is_partial = status == reqwest::StatusCode::PARTIAL_CONTENT;
     let total_size = response.content_length().unwrap_or(0);
 
     if let Some(pb) = progress_bar {
         if total_size > 0 {
-            pb.set_length(total_size);
+            pb.set_length(total_size + existing_len);
         }
     }
 
     let mut stream = response.bytes_stream();
-    let mut file = tokio::fs::File::create(dest)
-        .await
-        .map_err(|e| NetworkError::OperationFailed(format!("Failed to create file: {e}")))?;
 
-    let mut hasher = Sha256::new();
-    let mut downloaded = 0;
+    let mut file = if is_partial && existing_len > 0 {
+        tokio::fs::OpenOptions::new()
+            .append(true)
+            .open(dest)
+            .await
+            .map_err(|e| NetworkError::OperationFailed(format!("Failed to open file: {e}")))?
+    } else {
+        tokio::fs::File::create(dest)
+            .await
+            .map_err(|e| NetworkError::OperationFailed(format!("Failed to create file: {e}")))?
+    };
+
+    let mut downloaded = existing_len;
 
     while let Some(chunk) = stream.next().await {
         let chunk = chunk?;
-        hasher.update(&chunk);
         file.write_all(&chunk)
             .await
             .map_err(|e| NetworkError::OperationFailed(format!("Failed to write file: {e}")))?;
@@ -59,8 +178,17 @@ pub async fn download_file(
         .await
         .map_err(|e| NetworkError::OperationFailed(format!("Failed to flush file: {e}")))?;
 
+    drop(file);
+
+    // Re-read the full file to compute checksum (ensures resume correctness)
+    let content = tokio::fs::read(dest)
+        .await
+        .map_err(|e| NetworkError::OperationFailed(format!("Failed to read file for checksum: {e}")))?;
+    let mut hasher = Sha256::new();
+    hasher.update(&content);
     let checksum = format!("{:x}", hasher.finalize());
-    Ok(checksum)
+
+    Ok((checksum, response_etag))
 }
 
 /// Download multiple files in parallel
@@ -68,6 +196,7 @@ pub async fn download_parallel(
     client: &Client,
     downloads: &[DownloadTask],
     max_concurrent: usize,
+    max_retries: u32,
 ) -> Result<Vec<DownloadResult>, NetworkError> {
     let total = downloads.len() as u64;
     let pb = ProgressBar::new(total);
@@ -88,7 +217,7 @@ pub async fn download_parallel(
             let pb = pb_clone.clone();
             async move {
                 let filename = task.filename.clone();
-                let result = download_file_with_retry(&client, &task, max_concurrent).await;
+                let result = download_file_with_retry(&client, &task, max_retries).await;
                 pb.inc(1);
                 pb.set_message(filename.clone());
                 result
@@ -125,30 +254,83 @@ pub struct DownloadResult {
 async fn download_file_with_retry(
     client: &Client,
     task: &DownloadTask,
-    _max_retries: usize,
+    max_retries: u32,
 ) -> DownloadResult {
-    // Simple implementation without retry for now
-    match download_file(client, &task.url, &task.dest_path, None).await {
-        Ok(checksum) => {
-            let success = task
-                .expected_checksum
-                .as_ref()
-                .map_or(true, |expected| expected == &checksum);
+    for attempt in 0..=max_retries {
+        match download_file(client, &task.url, &task.dest_path, None, true, None).await {
+            Ok((checksum, _etag)) => {
+                let success = task
+                    .expected_checksum
+                    .as_ref()
+                    .map_or(true, |expected| expected == &checksum);
 
-            DownloadResult {
-                filename: task.filename.clone(),
-                dest_path: task.dest_path.clone(),
-                checksum,
-                success,
-                error: None,
+                return DownloadResult {
+                    filename: task.filename.clone(),
+                    dest_path: task.dest_path.clone(),
+                    checksum,
+                    success,
+                    error: None,
+                };
+            }
+            Err(e) => {
+                if attempt < max_retries && is_transient_error(&e) {
+                    let delay = backoff_delay(attempt);
+                    tracing::warn!(
+                        "Download attempt {}/{} failed for {}: {}. Retrying in {:?}...",
+                        attempt + 1,
+                        max_retries + 1,
+                        task.filename,
+                        e,
+                        delay
+                    );
+                    tokio::time::sleep(delay).await;
+                } else {
+                    return DownloadResult {
+                        filename: task.filename.clone(),
+                        dest_path: task.dest_path.clone(),
+                        checksum: String::new(),
+                        success: false,
+                        error: Some(e.to_string()),
+                    };
+                }
             }
         }
-        Err(e) => DownloadResult {
-            filename: task.filename.clone(),
-            dest_path: task.dest_path.clone(),
-            checksum: String::new(),
-            success: false,
-            error: Some(e.to_string()),
-        },
     }
+
+    // Unreachable, but satisfies compiler
+    DownloadResult {
+        filename: task.filename.clone(),
+        dest_path: task.dest_path.clone(),
+        checksum: String::new(),
+        success: false,
+        error: Some("Max retries exceeded".into()),
+    }
+}
+
+/// Check if an error is transient (worth retrying)
+fn is_transient_error(err: &NetworkError) -> bool {
+    match err {
+        NetworkError::HttpError(e) => {
+            e.is_timeout()
+                || e.is_connect()
+                || e.status()
+                    .map_or(false, |s| s.is_server_error() || s == reqwest::StatusCode::TOO_MANY_REQUESTS)
+        }
+        NetworkError::OperationFailed(msg) => {
+            // Retry on broken stream / connection reset
+            msg.contains("broken pipe")
+                || msg.contains("connection reset")
+                || msg.contains("connection refused")
+        }
+        _ => false,
+    }
+}
+
+/// Compute exponential backoff delay with jitter
+fn backoff_delay(attempt: u32) -> Duration {
+    let base = 1000u64; // 1 second
+    let exponential = base * 2_u64.pow(attempt);
+    let capped = exponential.min(30_000); // cap at 30 seconds
+    let jitter = fastrand::u64(0..=500); // 0-500ms jitter
+    Duration::from_millis(capped + jitter)
 }
