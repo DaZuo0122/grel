@@ -44,6 +44,11 @@ workspace = true
 
 [dev-dependencies]
 reqwest.workspace = true
+tar.workspace = true
+flate2.workspace = true
+wiremock.workspace = true
+sqlx.workspace = true
+zip.workspace = true
 
 [workspace]
 resolver = "2"
@@ -102,6 +107,7 @@ sha2 = "0.10"
 directories = "5"
 tar = "0.4"
 zip = "2"
+flate2 = "1"
 zstd = "0.13"
 xz2 = "0.1"
 bzip2 = "0.5"

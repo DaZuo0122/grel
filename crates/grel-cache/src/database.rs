@@ -1195,6 +1195,13 @@ impl Database {
         self.pool.close().await;
     }
 
+    /// Access the underlying connection pool.
+    ///
+    /// Intended for test helpers that need to run ad-hoc SQL.
+    pub fn pool(&self) -> &SqlitePool {
+        &self.pool
+    }
+
     /// Begin a new SQLite transaction for atomic multi-statement operations.
     pub async fn begin_transaction(&self) -> Result<DbTransaction<'_>, DatabaseError> {
         let tx = self.pool.begin().await?;
@@ -2269,6 +2276,14 @@ impl<'a> DbTransaction<'a> {
     /// Roll back the transaction.
     pub async fn rollback(self) -> Result<(), DatabaseError> {
         self.tx.rollback().await.map_err(DatabaseError::from)
+    }
+
+    /// Access the underlying sqlx transaction.
+    ///
+    /// Intended for test code that needs to run ad-hoc SQL inside the
+    /// transaction boundary.
+    pub fn tx(&mut self) -> &mut sqlx::Transaction<'a, sqlx::Sqlite> {
+        &mut self.tx
     }
 }
 
