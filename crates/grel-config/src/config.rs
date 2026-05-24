@@ -9,7 +9,7 @@ use figment::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::paths::{default_bin_dir, default_install_root};
+use crate::paths::{default_bin_dir, default_config_file, default_install_root};
 
 /// Schema version for the configuration
 pub const CONFIG_SCHEMA_VERSION: u32 = 1;
@@ -474,12 +474,29 @@ fn default_true() -> bool {
     true
 }
 
-/// Load configuration from file, environment, and defaults
+/// Load configuration from file, environment, and defaults.
+///
+/// Configuration resolution order (later overrides earlier):
+/// 1. Built-in defaults
+/// 2. Config file (`-C` flag, or auto-discovered at `~/.config/grel/config.toml`
+///    / `%APPDATA%\grel\config.toml` / `~/Library/Application Support/grel/config.toml`)
+/// 3. Environment variables (`GREL_*`)
 pub fn load_config(config_path: Option<&std::path::Path>) -> Result<Config, ConfigError> {
     let mut figment = Figment::from(Serialized::defaults(Config::default()));
 
-    // Load from config file if provided
-    if let Some(path) = config_path {
+    // Load from config file if provided, otherwise auto-discover
+    let config_file = if let Some(path) = config_path {
+        Some(path.to_path_buf())
+    } else {
+        let default = default_config_file();
+        if default.exists() {
+            Some(default)
+        } else {
+            None
+        }
+    };
+
+    if let Some(ref path) = config_file {
         figment = figment.merge(Toml::file(path));
     }
 
@@ -510,4 +527,83 @@ pub enum ConfigError {
 
     #[error("Invalid configuration value: {0}")]
     InvalidValue(String),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn test_default_config_file_ends_with_config_toml() {
+        let path = default_config_file();
+        assert_eq!(path.file_name().unwrap(), "config.toml");
+    }
+
+    #[test]
+    fn test_load_config_explicit_path() {
+        let mut tmp = std::env::temp_dir();
+        tmp.push(format!("grel-test-config-{}", std::process::id()));
+        let config_path = tmp.join("config.toml");
+
+        // Ensure parent dir exists
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        // Write a minimal custom config
+        {
+            let mut file = std::fs::File::create(&config_path).unwrap();
+            file.write_all(
+                br#"
+[general]
+version = 1
+max_concurrent = 8
+
+[security]
+verify_signatures = true
+"#,
+            )
+            .unwrap();
+        }
+
+        let config = load_config(Some(&config_path)).unwrap();
+        assert_eq!(config.general.max_concurrent, 8);
+        assert!(config.security.verify_signatures);
+
+        // Cleanup
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_load_config_defaults_when_no_file() {
+        let config = load_config(None).unwrap();
+        assert_eq!(config.general.version, CONFIG_SCHEMA_VERSION);
+        assert_eq!(config.general.max_concurrent, DEFAULT_MAX_CONCURRENT);
+        assert!(!config.security.verify_signatures);
+        assert!(config.security.verify_checksums);
+    }
+
+    #[test]
+    fn test_load_config_invalid_schema_version() {
+        let mut tmp = std::env::temp_dir();
+        tmp.push(format!("grel-test-config-bad-{}", std::process::id()));
+        let config_path = tmp.join("config.toml");
+
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        {
+            let mut file = std::fs::File::create(&config_path).unwrap();
+            file.write_all(b"[general]\nversion = 999\n").unwrap();
+        }
+
+        let err = load_config(Some(&config_path)).unwrap_err();
+        match err {
+            ConfigError::InvalidSchemaVersion { found, expected } => {
+                assert_eq!(found, 999);
+                assert_eq!(expected, CONFIG_SCHEMA_VERSION);
+            }
+            other => panic!("Expected InvalidSchemaVersion, got: {other:?}"),
+        }
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 }

@@ -71,3 +71,8 @@ fn fallback_config_dir() -> PathBuf {
         .unwrap_or_else(|| std::env::temp_dir())
         .join(".config/grel")
 }
+
+/// Default config file path: `<config_dir>/config.toml`
+pub fn default_config_file() -> PathBuf {
+    config_dir().join("config.toml")
+}
