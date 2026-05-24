@@ -71,18 +71,6 @@ pub async fn cmd_upgrade_local(ctx: &CommandContext<'_>) -> Result<()> {
                 return Ok(());
             }
         }
-
-        let old_install_dir = std::path::Path::new(&existing_pkg.install_path);
-        if old_install_dir.exists() {
-            if old_install_dir.is_dir() {
-                std::fs::remove_dir_all(old_install_dir).ok();
-            } else {
-                std::fs::remove_file(old_install_dir).ok();
-            }
-        }
-        for bin_name in existing_pkg.binary_list() {
-            std::fs::remove_file(ctx.config.paths.bin_dir.join(&bin_name)).ok();
-        }
     }
 
     let install_dir = ctx.config.paths.install_root.join(format!(
@@ -136,6 +124,21 @@ pub async fn cmd_upgrade_local(ctx: &CommandContext<'_>) -> Result<()> {
 
     let (installed_binaries, is_managed) = match install_result {
         Ok(result) => {
+            // Delete old install now that new one succeeded
+            if let Some(ref existing_pkg) = existing {
+                let old_install_dir = std::path::Path::new(&existing_pkg.install_path);
+                if old_install_dir.exists() {
+                    if old_install_dir.is_dir() {
+                        let _ = std::fs::remove_dir_all(old_install_dir);
+                    } else {
+                        let _ = std::fs::remove_file(old_install_dir);
+                    }
+                }
+                for bin_name in existing_pkg.binary_list() {
+                    let _ = std::fs::remove_file(ctx.config.paths.bin_dir.join(&bin_name));
+                }
+            }
+
             let bins: Vec<String> = result
                 .installed_binaries
                 .iter()
@@ -151,12 +154,12 @@ pub async fn cmd_upgrade_local(ctx: &CommandContext<'_>) -> Result<()> {
             }
             (bins, true)
         }
-        Err(_) => {
-            println!(
-                "  {}",
-                "Warning: Could not extract, keeping as unmanaged".yellow()
-            );
-            (vec![], false)
+        Err(e) => {
+            // Clean up partial install
+            if install_dir.exists() {
+                let _ = std::fs::remove_dir_all(&install_dir);
+            }
+            return Err(anyhow::anyhow!("Failed to extract local archive: {e}"));
         }
     };
 
@@ -182,7 +185,15 @@ pub async fn cmd_upgrade_local(ctx: &CommandContext<'_>) -> Result<()> {
     pkg.status = grel_cache::models::PackageStatus::Active;
     pkg.manifest_source = grel_cache::models::ManifestSource::Heuristic;
 
-    db.upsert_package(&pkg).await?;
+    match db.begin_transaction().await {
+        Ok(mut tx) => {
+            tx.upsert_package(&pkg).await?;
+            tx.commit().await?;
+        }
+        Err(e) => {
+            return Err(anyhow::anyhow!("Failed to begin database transaction: {e}"));
+        }
+    }
 
     println!(
         "  {}",

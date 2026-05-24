@@ -1194,6 +1194,12 @@ impl Database {
     pub async fn close(self) {
         self.pool.close().await;
     }
+
+    /// Begin a new SQLite transaction for atomic multi-statement operations.
+    pub async fn begin_transaction(&self) -> Result<DbTransaction<'_>, DatabaseError> {
+        let tx = self.pool.begin().await?;
+        Ok(DbTransaction { tx })
+    }
 }
 
 #[cfg(test)]
@@ -1627,6 +1633,222 @@ mod tests {
         let result = db.check_integrity().await.unwrap();
         assert_eq!(result, "ok");
         db.close().await;
+    }
+
+    #[tokio::test]
+    async fn test_transaction_commit_persists_data() {
+        let db = open_test_db().await;
+
+        let mut tx = db.begin_transaction().await.unwrap();
+
+        let mut pkg = InstalledPackage::new("github".into(), "tx".into(), "commit".into());
+        pkg.version = "1.0.0".into();
+        pkg.asset_filename = "test.tar.gz".into();
+        pkg.install_path = "/tmp/tx".into();
+        pkg.status = PackageStatus::Active;
+
+        tx.upsert_package(&pkg).await.unwrap();
+        tx.commit().await.unwrap();
+
+        let fetched = db.get_package("github", "tx", "commit").await.unwrap();
+        assert!(fetched.is_some());
+        assert_eq!(fetched.unwrap().version, "1.0.0");
+
+        db.close().await;
+    }
+
+    #[tokio::test]
+    async fn test_transaction_rollback_discards_data() {
+        let db = open_test_db().await;
+
+        let mut tx = db.begin_transaction().await.unwrap();
+
+        let mut pkg = InstalledPackage::new("github".into(), "tx".into(), "rollback".into());
+        pkg.version = "2.0.0".into();
+        pkg.asset_filename = "test.tar.gz".into();
+        pkg.install_path = "/tmp/tx".into();
+        pkg.status = PackageStatus::Active;
+
+        tx.upsert_package(&pkg).await.unwrap();
+        tx.rollback().await.unwrap();
+
+        let fetched = db.get_package("github", "tx", "rollback").await.unwrap();
+        assert!(fetched.is_none());
+
+        db.close().await;
+    }
+
+    #[tokio::test]
+    async fn test_transaction_set_package_files_atomic() {
+        let db = open_test_db().await;
+
+        let mut pkg = InstalledPackage::new("github".into(), "tx".into(), "files".into());
+        pkg.version = "1.0.0".into();
+        pkg.asset_filename = "test.tar.gz".into();
+        pkg.install_path = "/tmp/tx".into();
+        pkg.status = PackageStatus::Active;
+
+        // Insert package outside transaction first
+        db.upsert_package(&pkg).await.unwrap();
+        let pkg_id = db.get_package("github", "tx", "files").await.unwrap().unwrap().id.unwrap();
+
+        // Use transaction to set files
+        let mut tx = db.begin_transaction().await.unwrap();
+        let files = vec![
+            PackageFile::new(pkg_id, "/tmp/tx/bin/rg".into(), "binary".into()),
+        ];
+        tx.set_package_files(pkg_id, &files).await.unwrap();
+        tx.commit().await.unwrap();
+
+        let stored = db.get_package_files(pkg_id).await.unwrap();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].file_path, "/tmp/tx/bin/rg");
+
+        db.close().await;
+    }
+}
+
+/// A database transaction wrapper for atomic multi-statement operations.
+///
+/// Created via [`Database::begin_transaction`]. Must be committed or rolled back.
+pub struct DbTransaction<'a> {
+    tx: sqlx::Transaction<'a, sqlx::Sqlite>,
+}
+
+impl<'a> DbTransaction<'a> {
+    /// Insert or update a package record inside the transaction.
+    pub async fn upsert_package(
+        &mut self,
+        pkg: &InstalledPackage,
+    ) -> Result<(), DatabaseError> {
+        sqlx::query(
+            r#"
+            INSERT INTO installed
+                (forge, owner, repo, version, asset_filename, checksum, install_path,
+                 installed_binaries, is_managed, status, orphaned_at, last_checked, manifest_source, is_explicit)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(forge, owner, repo) DO UPDATE SET
+                version = excluded.version,
+                asset_filename = excluded.asset_filename,
+                checksum = excluded.checksum,
+                install_path = excluded.install_path,
+                installed_binaries = excluded.installed_binaries,
+                is_managed = excluded.is_managed,
+                status = excluded.status,
+                orphaned_at = excluded.orphaned_at,
+                last_checked = excluded.last_checked,
+                manifest_source = excluded.manifest_source,
+                is_explicit = excluded.is_explicit
+            "#,
+        )
+        .bind(&pkg.forge)
+        .bind(&pkg.owner)
+        .bind(&pkg.repo)
+        .bind(&pkg.version)
+        .bind(&pkg.asset_filename)
+        .bind(&pkg.checksum)
+        .bind(&pkg.install_path)
+        .bind(&pkg.installed_binaries)
+        .bind(pkg.is_managed)
+        .bind(pkg.status.to_string())
+        .bind(pkg.orphaned_at)
+        .bind(pkg.last_checked)
+        .bind(pkg.manifest_source.to_string())
+        .bind(pkg.is_explicit)
+        .execute(&mut *self.tx)
+        .await?;
+
+        Ok(())
+    }
+
+    /// Get a package by reference inside the transaction.
+    pub async fn get_package(
+        &mut self,
+        forge: &str,
+        owner: &str,
+        repo: &str,
+    ) -> Result<Option<InstalledPackage>, DatabaseError> {
+        let row = sqlx::query(
+            r#"
+            SELECT id, forge, owner, repo, version, asset_filename, checksum,
+                   install_path, installed_binaries, is_managed, status, orphaned_at, last_checked, installed_at, manifest_source, is_explicit
+            FROM installed
+            WHERE forge = ? AND owner = ? AND repo = ?
+            "#,
+        )
+        .bind(forge)
+        .bind(owner)
+        .bind(repo)
+        .fetch_optional(&mut *self.tx)
+        .await?;
+
+        Ok(row.map(|r| Database::row_to_package(&r)))
+    }
+
+    /// Replace file records for a package inside the transaction.
+    pub async fn set_package_files(
+        &mut self,
+        package_id: i64,
+        files: &[crate::models::PackageFile],
+    ) -> Result<(), DatabaseError> {
+        sqlx::query("DELETE FROM package_files WHERE package_id = ?")
+            .bind(package_id)
+            .execute(&mut *self.tx)
+            .await?;
+
+        for file in files {
+            sqlx::query(
+                r#"
+                INSERT INTO package_files (package_id, file_path, file_type)
+                VALUES (?, ?, ?)
+                "#,
+            )
+            .bind(package_id)
+            .bind(&file.file_path)
+            .bind(&file.file_type)
+            .execute(&mut *self.tx)
+            .await?;
+        }
+
+        Ok(())
+    }
+
+    /// Replace dependency records for a package inside the transaction.
+    pub async fn set_dependencies(
+        &mut self,
+        package_id: i64,
+        deps: &[crate::models::Dependency],
+    ) -> Result<(), DatabaseError> {
+        sqlx::query("DELETE FROM dependencies WHERE package_id = ?")
+            .bind(package_id)
+            .execute(&mut *self.tx)
+            .await?;
+
+        for dep in deps {
+            sqlx::query(
+                r#"
+                INSERT INTO dependencies (package_id, dep_target, dep_type)
+                VALUES (?, ?, ?)
+                "#,
+            )
+            .bind(package_id)
+            .bind(&dep.dep_target)
+            .bind(dep.dep_type.to_string())
+            .execute(&mut *self.tx)
+            .await?;
+        }
+
+        Ok(())
+    }
+
+    /// Commit the transaction.
+    pub async fn commit(self) -> Result<(), DatabaseError> {
+        self.tx.commit().await.map_err(DatabaseError::from)
+    }
+
+    /// Roll back the transaction.
+    pub async fn rollback(self) -> Result<(), DatabaseError> {
+        self.tx.rollback().await.map_err(DatabaseError::from)
     }
 }
 

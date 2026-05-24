@@ -788,6 +788,13 @@ async fn install_single_package(
         db.store_etag(&chosen_asset.url, &etag).await.ok();
     }
 
+    let mut rollback = crate::commands::transaction::InstallRollback::new(
+        install_dir.clone(),
+        config.paths.bin_dir.clone(),
+        archive_path.clone(),
+        is_managed,
+    );
+
     let installed_binaries = if is_managed {
         match grel_network::archive::install_asset(
             &archive_path,
@@ -813,8 +820,8 @@ async fn install_single_package(
                 result.installed_binaries
             }
             Err(e) => {
-                eprintln!("  {}", format!("Warning: Failed to extract: {e}").yellow());
-                vec![]
+                rollback.rollback();
+                return Err(anyhow::anyhow!("Failed to extract archive: {e}"));
             }
         }
     } else {
@@ -825,6 +832,8 @@ async fn install_single_package(
         .iter()
         .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
         .collect();
+
+    rollback.record_binaries(&bin_filenames);
 
     // Save manifest and run post_install hook
     if let Some((ref manifest, _)) = manifest {
@@ -862,51 +871,57 @@ async fn install_single_package(
     pkg.manifest_source = manifest_source;
     pkg.is_explicit = is_explicit;
 
-    db.upsert_package(&pkg)
-        .await
-        .with_context(|| "Failed to update package record")?;
+    // Atomic DB transaction: upsert package + file index
+    let pkg_id = match db.begin_transaction().await {
+        Ok(mut tx) => {
+            tx.upsert_package(&pkg).await?;
+            let updated = tx
+                .get_package(&pkg_ref.forge.to_string(), &pkg_ref.owner, &pkg_ref.repo)
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("Package not found after upsert"))?;
 
-    let updated_pkg = db
-        .get_package(&pkg_ref.forge.to_string(), &pkg_ref.owner, &pkg_ref.repo)
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("Package not found after upsert"))?;
+            if is_managed {
+                if let Some(id) = updated.id {
+                    let files = collect_package_files(&install_dir, &config.paths.bin_dir, &archive_path);
+                    let file_paths: Vec<String> = files.iter().map(|(p, _)| p.clone()).collect();
 
-    // Record extracted files in the package_files index
-    if is_managed {
-        if let Some(pkg_id) = updated_pkg.id {
-            let files = collect_package_files(&install_dir, &config.paths.bin_dir, &archive_path);
-            let file_paths: Vec<String> = files.iter().map(|(p, _)| p.clone()).collect();
-
-            // Conflict detection: check if any files already belong to other packages
-            if let Ok(conflicts) = db.find_conflicting_files(&file_paths).await {
-                let other_conflicts: Vec<_> = conflicts
-                    .into_iter()
-                    .filter(|(pkg, _)| pkg.id != Some(pkg_id))
-                    .collect();
-                if !other_conflicts.is_empty() {
-                    eprintln!(
-                        "  {}",
-                        format!("Warning: {} file(s) conflict with other packages:", other_conflicts.len()).yellow()
-                    );
-                    let mut shown = std::collections::HashSet::new();
-                    for (conflict_pkg, conflict_path) in &other_conflicts {
-                        let key = format!("{} -> {}", conflict_pkg.package_ref(), conflict_path);
-                        if shown.insert(key.clone()) {
-                            eprintln!("    {} owns '{}'", conflict_pkg.package_ref(), conflict_path);
+                    // Conflict detection: check if any files already belong to other packages
+                    if let Ok(conflicts) = db.find_conflicting_files(&file_paths).await {
+                        let other_conflicts: Vec<_> = conflicts
+                            .into_iter()
+                            .filter(|(pkg, _)| pkg.id != Some(id))
+                            .collect();
+                        if !other_conflicts.is_empty() {
+                            eprintln!(
+                                "  {}",
+                                format!("Warning: {} file(s) conflict with other packages:", other_conflicts.len()).yellow()
+                            );
+                            let mut shown = std::collections::HashSet::new();
+                            for (conflict_pkg, conflict_path) in &other_conflicts {
+                                let key = format!("{} -> {}", conflict_pkg.package_ref(), conflict_path);
+                                if shown.insert(key.clone()) {
+                                    eprintln!("    {} owns '{}'", conflict_pkg.package_ref(), conflict_path);
+                                }
+                            }
                         }
                     }
+
+                    let file_models: Vec<grel_cache::models::PackageFile> = files
+                        .into_iter()
+                        .map(|(path, ftype)| grel_cache::models::PackageFile::new(id, path, ftype))
+                        .collect();
+                    tx.set_package_files(id, &file_models).await?;
                 }
             }
 
-            let file_models: Vec<grel_cache::models::PackageFile> = files
-                .into_iter()
-                .map(|(path, ftype)| grel_cache::models::PackageFile::new(pkg_id, path, ftype))
-                .collect();
-            if let Err(e) = db.set_package_files(pkg_id, &file_models).await {
-                tracing::warn!("Failed to record package files: {e}");
-            }
+            tx.commit().await?;
+            updated.id.unwrap_or(-1)
         }
-    }
+        Err(e) => {
+            rollback.rollback();
+            return Err(anyhow::anyhow!("Failed to begin database transaction: {e}"));
+        }
+    };
 
     if download_only {
         println!(
@@ -920,7 +935,7 @@ async fn install_single_package(
         );
     }
 
-    Ok(updated_pkg.id.unwrap_or(-1))
+    Ok(pkg_id)
 }
 
 /// Walk the install directory and collect all files with type hints.
@@ -1551,6 +1566,13 @@ pub async fn cmd_sync(ctx: &CommandContext<'_>, packages: &[String]) -> Result<(
             db.store_etag(&chosen_asset.url, &etag).await.ok();
         }
 
+        let mut rollback = crate::commands::transaction::InstallRollback::new(
+            install_dir.clone(),
+            ctx.config.paths.bin_dir.clone(),
+            archive_path.clone(),
+            is_managed,
+        );
+
         let installed_binaries = if is_managed {
             match grel_network::archive::install_asset(
                 &archive_path,
@@ -1576,8 +1598,8 @@ pub async fn cmd_sync(ctx: &CommandContext<'_>, packages: &[String]) -> Result<(
                     result.installed_binaries
                 }
                 Err(e) => {
-                    eprintln!("  {}", format!("Warning: Failed to extract: {e}").yellow());
-                    vec![]
+                    rollback.rollback();
+                    return Err(anyhow::anyhow!("Failed to extract archive: {e}"));
                 }
             }
         } else {
@@ -1588,6 +1610,8 @@ pub async fn cmd_sync(ctx: &CommandContext<'_>, packages: &[String]) -> Result<(
             .iter()
             .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
             .collect();
+
+        rollback.record_binaries(&bin_filenames);
 
         // Save manifest and run post_install hook
         if let Some((ref manifest, _)) = manifest {
@@ -1629,15 +1653,56 @@ pub async fn cmd_sync(ctx: &CommandContext<'_>, packages: &[String]) -> Result<(
         pkg.manifest_source = manifest_source;
         pkg.is_explicit = is_explicit;
 
-        db.upsert_package(&pkg)
-            .await
-            .with_context(|| "Failed to update package record")?;
+        // Atomic DB transaction: upsert package + file index
+        let target_pkg_id = match db.begin_transaction().await {
+            Ok(mut tx) => {
+                tx.upsert_package(&pkg).await?;
+                let updated = tx
+                    .get_package(&pkg_ref.forge.to_string(), &pkg_ref.owner, &pkg_ref.repo)
+                    .await?
+                    .ok_or_else(|| anyhow::anyhow!("Package not found after upsert"))?;
+                let pkg_id = updated.id.unwrap_or(-1);
 
-        let target_pkg_id = db
-            .get_package(&pkg_ref.forge.to_string(), &pkg_ref.owner, &pkg_ref.repo)
-            .await?
-            .and_then(|p| p.id)
-            .unwrap_or(-1);
+                if is_managed && pkg_id > 0 {
+                    let files = collect_package_files(&install_dir, &ctx.config.paths.bin_dir, &archive_path);
+                    let file_paths: Vec<String> = files.iter().map(|(p, _)| p.clone()).collect();
+
+                    // Conflict detection
+                    if let Ok(conflicts) = db.find_conflicting_files(&file_paths).await {
+                        let other_conflicts: Vec<_> = conflicts
+                            .into_iter()
+                            .filter(|(pkg, _)| pkg.id != Some(pkg_id))
+                            .collect();
+                        if !other_conflicts.is_empty() {
+                            eprintln!(
+                                "  {}",
+                                format!("Warning: {} file(s) conflict with other packages:", other_conflicts.len()).yellow()
+                            );
+                            let mut shown = std::collections::HashSet::new();
+                            for (conflict_pkg, conflict_path) in &other_conflicts {
+                                let key = format!("{} -> {}", conflict_pkg.package_ref(), conflict_path);
+                                if shown.insert(key.clone()) {
+                                    eprintln!("    {} owns '{}'", conflict_pkg.package_ref(), conflict_path);
+                                }
+                            }
+                        }
+                    }
+
+                    let file_models: Vec<grel_cache::models::PackageFile> = files
+                        .into_iter()
+                        .map(|(path, ftype)| grel_cache::models::PackageFile::new(pkg_id, path, ftype))
+                        .collect();
+                    tx.set_package_files(pkg_id, &file_models).await?;
+                }
+
+                tx.commit().await?;
+                pkg_id
+            }
+            Err(e) => {
+                rollback.rollback();
+                return Err(anyhow::anyhow!("Failed to begin database transaction: {e}"));
+            }
+        };
 
         if let Some((ref manifest, _)) = manifest {
             let grel_deps = manifest.parse_grel_deps();
@@ -2420,10 +2485,7 @@ async fn upgrade_single_package(
 
     if is_managed {
         let extracted_dir = install_dir.join("extracted");
-        if extracted_dir.exists() {
-            std::fs::remove_dir_all(&extracted_dir)
-                .map_err(|e| anyhow::anyhow!("Failed to clean old extraction directory: {e}"))?;
-        }
+        let backup = crate::commands::transaction::backup_directory(&extracted_dir);
 
         match grel_network::archive::install_asset(
             &archive_path,
@@ -2433,6 +2495,11 @@ async fn upgrade_single_package(
             overwrite,
         ) {
             Ok(result) => {
+                // Discard backup on success
+                if let Some(ref b) = backup {
+                    crate::commands::transaction::discard_backup(b);
+                }
+
                 let bin_filenames: Vec<String> = result
                     .installed_binaries
                     .iter()
@@ -2454,6 +2521,10 @@ async fn upgrade_single_package(
                 }
             }
             Err(e) => {
+                // Restore backup on failure
+                if let Some(ref b) = backup {
+                    crate::commands::transaction::restore_backup(b, &extracted_dir);
+                }
                 return Err(anyhow::anyhow!("Failed to extract: {e}"));
             }
         }
@@ -2488,9 +2559,25 @@ async fn upgrade_single_package(
         std::fs::remove_file(&archive_path).ok();
     }
 
-    db.upsert_package(&updated_pkg)
-        .await
-        .with_context(|| "Failed to update package record")?;
+    // Atomic DB transaction: upsert + file index
+    let pkg_id = pkg.id.unwrap_or(-1);
+    match db.begin_transaction().await {
+        Ok(mut tx) => {
+            tx.upsert_package(&updated_pkg).await?;
+            if is_managed && pkg_id > 0 {
+                let files = collect_package_files(&install_dir, &config.paths.bin_dir, &archive_path);
+                let file_models: Vec<grel_cache::models::PackageFile> = files
+                    .into_iter()
+                    .map(|(path, ftype)| grel_cache::models::PackageFile::new(pkg_id, path, ftype))
+                    .collect();
+                tx.set_package_files(pkg_id, &file_models).await?;
+            }
+            tx.commit().await?;
+        }
+        Err(e) => {
+            return Err(anyhow::anyhow!("Failed to begin database transaction: {e}"));
+        }
+    }
 
     Ok(installed_bins)
 }

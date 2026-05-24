@@ -21,6 +21,7 @@ pub mod files;
 pub mod query;
 pub mod remove;
 pub mod sync;
+pub mod transaction;
 pub mod upgrade;
 
 /// Shared context for command handlers.
