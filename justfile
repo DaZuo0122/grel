@@ -53,3 +53,8 @@ test-filter filter:
 # Run the full shell-based CLI regression suite
 test-regression:
     @sh tests/regression_cli.sh
+
+# Run stress / concurrency tests (may be slow)
+test-stress:
+    cargo test --test transaction_e2e
+    cargo test --test concurrency_stress
