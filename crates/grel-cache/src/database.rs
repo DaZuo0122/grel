@@ -1706,6 +1706,426 @@ mod tests {
 
         db.close().await;
     }
+
+    // -----------------------------------------------------------------------
+    // Part 1.1: Atomicity Under Failure
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn tx_upsert_and_files_rollback_both_gone() {
+        let db = open_test_db().await;
+
+        let mut pkg = InstalledPackage::new("github".into(), "tx".into(), "both".into());
+        pkg.version = "1.0.0".into();
+        pkg.asset_filename = "test.tar.gz".into();
+        pkg.install_path = "/tmp/both".into();
+        pkg.status = PackageStatus::Active;
+
+        let mut tx = db.begin_transaction().await.unwrap();
+        tx.upsert_package(&pkg).await.unwrap();
+        let pkg_id = tx.get_package("github", "tx", "both").await.unwrap().unwrap().id.unwrap();
+
+        let files: Vec<PackageFile> = (0..100)
+            .map(|i| PackageFile::new(pkg_id, format!("/tmp/both/file{i}.txt"), "data".into()))
+            .collect();
+        tx.set_package_files(pkg_id, &files).await.unwrap();
+        tx.rollback().await.unwrap();
+
+        assert!(db.get_package("github", "tx", "both").await.unwrap().is_none());
+        assert!(db.get_package_files(pkg_id).await.unwrap().is_empty());
+
+        db.close().await;
+    }
+
+    #[tokio::test]
+    async fn tx_set_dependencies_atomic_with_package_rollback() {
+        let db = open_test_db().await;
+
+        let mut pkg = InstalledPackage::new("github".into(), "tx".into(), "deps".into());
+        pkg.version = "1.0.0".into();
+        pkg.asset_filename = "test.tar.gz".into();
+        pkg.install_path = "/tmp/deps".into();
+        pkg.status = PackageStatus::Active;
+
+        // Insert a dependency target package first (so foreign key is valid-ish)
+        let mut dep_pkg = InstalledPackage::new("github".into(), "dep".into(), "target".into());
+        dep_pkg.version = "1.0.0".into();
+        dep_pkg.asset_filename = "dep.zip".into();
+        dep_pkg.install_path = "/tmp/dep".into();
+        dep_pkg.status = PackageStatus::Active;
+        db.upsert_package(&dep_pkg).await.unwrap();
+        let _dep_id = db.get_package("github", "dep", "target").await.unwrap().unwrap().id.unwrap();
+
+        let mut tx = db.begin_transaction().await.unwrap();
+        tx.upsert_package(&pkg).await.unwrap();
+        let pkg_id = tx.get_package("github", "tx", "deps").await.unwrap().unwrap().id.unwrap();
+
+        let deps = vec![
+            crate::models::Dependency::grel(pkg_id, &grel_core::PackageRef::parse("github/dep/target").unwrap()),
+            crate::models::Dependency::system(pkg_id, "libssl.so.3"),
+        ];
+        tx.set_dependencies(pkg_id, &deps).await.unwrap();
+        tx.rollback().await.unwrap();
+
+        assert!(db.get_package("github", "tx", "deps").await.unwrap().is_none());
+        // Dependencies table should have no rows for pkg_id
+        let dep_rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM dependencies WHERE package_id = ?")
+            .bind(pkg_id)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+        assert_eq!(dep_rows, 0);
+
+        db.close().await;
+    }
+
+    #[tokio::test]
+    async fn tx_drop_without_commit_auto_rollback() {
+        let db = open_test_db().await;
+
+        {
+            let mut tx = db.begin_transaction().await.unwrap();
+            let mut pkg = InstalledPackage::new("github".into(), "tx".into(), "dropped".into());
+            pkg.version = "1.0.0".into();
+            pkg.asset_filename = "test.tar.gz".into();
+            pkg.install_path = "/tmp/dropped".into();
+            pkg.status = PackageStatus::Active;
+            tx.upsert_package(&pkg).await.unwrap();
+            // tx is dropped here without commit or rollback
+        }
+
+        assert!(db.get_package("github", "tx", "dropped").await.unwrap().is_none());
+        db.close().await;
+    }
+
+    // -----------------------------------------------------------------------
+    // Part 1.2: Isolation & Visibility
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn tx_uncommitted_not_visible_outside() {
+        let db = open_test_db().await;
+        let db2 = db.clone();
+
+        let mut tx = db.begin_transaction().await.unwrap();
+        let mut pkg = InstalledPackage::new("github".into(), "tx".into(), "iso".into());
+        pkg.version = "1.0.0".into();
+        pkg.asset_filename = "test.tar.gz".into();
+        pkg.install_path = "/tmp/iso".into();
+        pkg.status = PackageStatus::Active;
+        tx.upsert_package(&pkg).await.unwrap();
+
+        // Before commit, another handle on the same pool must NOT see the row
+        let outside = db2.get_package("github", "tx", "iso").await.unwrap();
+        assert!(outside.is_none(), "uncommitted tx data must not be visible outside");
+
+        tx.commit().await.unwrap();
+
+        // After commit, it must be visible
+        let after = db2.get_package("github", "tx", "iso").await.unwrap();
+        assert!(after.is_some());
+
+        db.close().await;
+    }
+
+    #[tokio::test]
+    async fn tx_uncommitted_files_not_visible_outside() {
+        let db = open_test_db().await;
+
+        let mut pkg = InstalledPackage::new("github".into(), "tx".into(), "isofiles".into());
+        pkg.version = "1.0.0".into();
+        pkg.asset_filename = "test.tar.gz".into();
+        pkg.install_path = "/tmp/isofiles".into();
+        pkg.status = PackageStatus::Active;
+        db.upsert_package(&pkg).await.unwrap();
+        let pkg_id = db.get_package("github", "tx", "isofiles").await.unwrap().unwrap().id.unwrap();
+
+        let mut tx = db.begin_transaction().await.unwrap();
+        tx.set_package_files(pkg_id, &[PackageFile::new(pkg_id, "/tmp/isofiles/bin/rg".into(), "binary".into())])
+            .await
+            .unwrap();
+
+        // Outside the tx, files must not be visible
+        let outside = db.get_package_files(pkg_id).await.unwrap();
+        assert!(outside.is_empty(), "uncommitted files must not be visible");
+
+        tx.commit().await.unwrap();
+
+        let after = db.get_package_files(pkg_id).await.unwrap();
+        assert_eq!(after.len(), 1);
+
+        db.close().await;
+    }
+
+    #[tokio::test]
+    async fn tx_conflict_detection_during_tx() {
+        let db = open_test_db().await;
+
+        // P1 owns /bin/rg (committed)
+        let mut p1 = InstalledPackage::new("github".into(), "a".into(), "b".into());
+        p1.version = "1.0.0".into();
+        p1.asset_filename = "a.zip".into();
+        p1.install_path = "/tmp/ab".into();
+        p1.status = PackageStatus::Active;
+        db.upsert_package(&p1).await.unwrap();
+        let id1 = db.get_package("github", "a", "b").await.unwrap().unwrap().id.unwrap();
+        db.set_package_files(id1, &[PackageFile::new(id1, "/bin/rg".into(), "binary".into())])
+            .await
+            .unwrap();
+
+        // P2 tries to also claim /bin/rg inside a transaction (not committed)
+        let mut p2 = InstalledPackage::new("github".into(), "c".into(), "d".into());
+        p2.version = "1.0.0".into();
+        p2.asset_filename = "c.zip".into();
+        p2.install_path = "/tmp/cd".into();
+        p2.status = PackageStatus::Active;
+        let mut tx = db.begin_transaction().await.unwrap();
+        tx.upsert_package(&p2).await.unwrap();
+        let id2 = tx.get_package("github", "c", "d").await.unwrap().unwrap().id.unwrap();
+        tx.set_package_files(id2, &[PackageFile::new(id2, "/bin/rg".into(), "binary".into())])
+            .await
+            .unwrap();
+
+        // Conflict check from outside must NOT see P2's uncommitted /bin/rg
+        let conflicts = db.find_conflicting_files(&["/bin/rg".into()]).await.unwrap();
+        let p2_conflicts: Vec<_> = conflicts.into_iter().filter(|(p, _)| p.repo == "d").collect();
+        assert!(p2_conflicts.is_empty(), "uncommitted file must not appear in conflict check");
+
+        tx.rollback().await.unwrap();
+        db.close().await;
+    }
+
+    // -----------------------------------------------------------------------
+    // Part 1.3: Concurrent Writer Contention
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn concurrent_upserts_same_package() {
+        let db = open_test_db().await;
+        let db = std::sync::Arc::new(db);
+        let mut handles = vec![];
+
+        for i in 0..10 {
+            let db = db.clone();
+            handles.push(tokio::spawn(async move {
+                let mut tx = db.begin_transaction().await.unwrap();
+                let mut pkg = InstalledPackage::new("github".into(), "race".into(), "same".into());
+                pkg.version = format!("1.0.{i}");
+                pkg.asset_filename = "test.tar.gz".into();
+                pkg.install_path = "/tmp/race".into();
+                pkg.status = PackageStatus::Active;
+                tx.upsert_package(&pkg).await.unwrap();
+                tx.commit().await.unwrap();
+            }));
+        }
+
+        for h in handles {
+            h.await.unwrap();
+        }
+
+        let final_pkg = db.get_package("github", "race", "same").await.unwrap().unwrap();
+        // Version must be one of the 10 values
+        let valid: std::collections::HashSet<String> =
+            (0..10).map(|i| format!("1.0.{i}")).collect();
+        assert!(valid.contains(&final_pkg.version));
+
+        // db is inside Arc — drop naturally (pool closes on drop)
+    }
+
+    #[tokio::test]
+    async fn concurrent_set_package_files_same_id() {
+        let db = open_test_db().await;
+        let db = std::sync::Arc::new(db);
+
+        let mut pkg = InstalledPackage::new("github".into(), "race".into(), "files".into());
+        pkg.version = "1.0.0".into();
+        pkg.asset_filename = "test.tar.gz".into();
+        pkg.install_path = "/tmp/race".into();
+        pkg.status = PackageStatus::Active;
+        db.upsert_package(&pkg).await.unwrap();
+        let pkg_id = db.get_package("github", "race", "files").await.unwrap().unwrap().id.unwrap();
+
+        let mut handles = vec![];
+        for batch in 0..10 {
+            let db = db.clone();
+            handles.push(tokio::spawn(async move {
+                let mut tx = db.begin_transaction().await.unwrap();
+                let files: Vec<PackageFile> = (0..100)
+                    .map(|i| PackageFile::new(pkg_id, format!("/tmp/race/batch{batch}_file{i}.txt"), "data".into()))
+                    .collect();
+                tx.set_package_files(pkg_id, &files).await.unwrap();
+                tx.commit().await.unwrap();
+            }));
+        }
+
+        for h in handles {
+            h.await.unwrap();
+        }
+
+        let stored = db.get_package_files(pkg_id).await.unwrap();
+        assert_eq!(stored.len(), 100, "final file list must be exactly one batch (100 files), not a mix");
+        // All files must belong to the same batch
+        let first = stored[0].file_path.clone();
+        let batch_prefix = first.split('_').next().unwrap().to_string();
+        for f in &stored {
+            assert!(f.file_path.starts_with(&batch_prefix), "files must not be mixed across batches");
+        }
+
+        // db is inside Arc — drop naturally
+    }
+
+    #[tokio::test]
+    async fn concurrent_insert_different_packages() {
+        let db = open_test_db().await;
+        let db = std::sync::Arc::new(db);
+        let mut handles = vec![];
+
+        for i in 0..50 {
+            let db = db.clone();
+            handles.push(tokio::spawn(async move {
+                let mut tx = db.begin_transaction().await.unwrap();
+                let mut pkg = InstalledPackage::new("github".into(), "owner".into(), format!("repo{i}"));
+                pkg.version = "1.0.0".into();
+                pkg.asset_filename = "test.tar.gz".into();
+                pkg.install_path = format!("/tmp/repo{i}");
+                pkg.status = PackageStatus::Active;
+                tx.upsert_package(&pkg).await.unwrap();
+                let pkg_id = tx.get_package("github", "owner", &format!("repo{i}")).await.unwrap().unwrap().id.unwrap();
+                let files = vec![PackageFile::new(pkg_id, format!("/tmp/repo{i}/file.txt"), "data".into())];
+                tx.set_package_files(pkg_id, &files).await.unwrap();
+                tx.commit().await.unwrap();
+            }));
+        }
+
+        for h in handles {
+            h.await.unwrap();
+        }
+
+        let all = db.list_packages().await.unwrap();
+        assert_eq!(all.len(), 50, "all 50 packages must be present");
+
+        let total_files: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM package_files")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+        assert_eq!(total_files, 50, "each package has exactly 1 file");
+
+        // db is inside Arc — drop naturally
+    }
+
+    #[tokio::test]
+    async fn read_during_heavy_write_load() {
+        let db = open_test_db().await;
+        let db = std::sync::Arc::new(db);
+        let mut handles = vec![];
+
+        // 20 writers
+        for w in 0..20 {
+            let db = db.clone();
+            handles.push(tokio::spawn(async move {
+                for i in 0..10 {
+                    let mut pkg = InstalledPackage::new(
+                        "github".into(),
+                        format!("writer{w}"),
+                        format!("pkg{i}"),
+                    );
+                    pkg.version = "1.0.0".into();
+                    pkg.asset_filename = "test.tar.gz".into();
+                    pkg.install_path = format!("/tmp/w{w}_p{i}");
+                    pkg.status = PackageStatus::Active;
+                    db.upsert_package(&pkg).await.unwrap();
+                }
+            }));
+        }
+
+        // 1 reader in tight loop
+        let db_reader = db.clone();
+        let read_handle = tokio::spawn(async move {
+            for _ in 0..50 {
+                let list = db_reader.list_packages().await.unwrap();
+                // Verify no corrupted rows
+                for pkg in &list {
+                    assert!(!pkg.forge.is_empty());
+                    assert!(!pkg.owner.is_empty());
+                    assert!(!pkg.repo.is_empty());
+                }
+                tokio::time::sleep(tokio::time::Duration::from_millis(5)).await;
+            }
+        });
+
+        for h in handles {
+            h.await.unwrap();
+        }
+        read_handle.await.unwrap();
+
+        let final_count = db.list_packages().await.unwrap().len();
+        assert_eq!(final_count, 200, "20 writers x 10 packages each = 200");
+
+        // db is inside Arc — drop naturally
+    }
+
+    // -----------------------------------------------------------------------
+    // Part 1.4: Transaction Lifecycle Edge Cases
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn empty_transaction_commit_ok() {
+        let db = open_test_db().await;
+        let tx = db.begin_transaction().await.unwrap();
+        tx.commit().await.unwrap();
+        db.close().await;
+    }
+
+    #[tokio::test]
+    async fn tx_with_zero_dependencies_clears_existing() {
+        let db = open_test_db().await;
+
+        let mut pkg = InstalledPackage::new("github".into(), "tx".into(), "zerodeps".into());
+        pkg.version = "1.0.0".into();
+        pkg.asset_filename = "test.tar.gz".into();
+        pkg.install_path = "/tmp/zerodeps".into();
+        pkg.status = PackageStatus::Active;
+        db.upsert_package(&pkg).await.unwrap();
+        let pkg_id = db.get_package("github", "tx", "zerodeps").await.unwrap().unwrap().id.unwrap();
+
+        // Insert some deps directly
+        let deps = vec![
+            crate::models::Dependency::system(pkg_id, "libssl.so.3"),
+            crate::models::Dependency::system(pkg_id, "libcrypto.so.3"),
+        ];
+        db.set_dependencies(pkg_id, &deps).await.unwrap();
+
+        let before: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM dependencies WHERE package_id = ?")
+            .bind(pkg_id)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+        assert_eq!(before, 2);
+
+        // Now use tx to set zero deps — must delete existing
+        let mut tx = db.begin_transaction().await.unwrap();
+        tx.set_dependencies(pkg_id, &[]).await.unwrap();
+        tx.commit().await.unwrap();
+
+        let after: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM dependencies WHERE package_id = ?")
+            .bind(pkg_id)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+        assert_eq!(after, 0, "setting empty deps in tx must clear existing rows");
+
+        db.close().await;
+    }
+
+    #[tokio::test]
+    async fn tx_on_closed_pool_errors() {
+        let db = open_test_db().await;
+        let db2 = db.clone();
+        db2.close().await;
+
+        let result = db.begin_transaction().await;
+        assert!(result.is_err(), "begin_transaction on closed pool must error");
+    }
 }
 
 /// A database transaction wrapper for atomic multi-statement operations.

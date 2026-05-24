@@ -134,4 +134,116 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
+    // -----------------------------------------------------------------------
+    // Part 2.3: ContentStore TOCTOU & Concurrent Access
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn concurrent_insert_same_hash_race() {
+        let tmp = std::env::temp_dir().join(format!("grel-cs-concurrent-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let store = ContentStore::new(tmp.join("store"));
+
+        let hash = "aabbccdd11223344556677889900aabbccdd11223344556677889900aabbccdd";
+        let mut handles = vec![];
+
+        for i in 0..10 {
+            let store = ContentStore::new(tmp.join("store"));
+            let source = tmp.join(format!("source{i}.txt"));
+            std::fs::write(&source, format!("content{i}")).unwrap();
+            handles.push(std::thread::spawn(move || {
+                store.insert_from_path(&source, hash).ok()
+            }));
+        }
+
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        // Store must contain exactly one file for this hash
+        let stored_path = store.path_for(hash);
+        assert!(stored_path.exists());
+        let content = std::fs::read_to_string(&stored_path).unwrap();
+        // Content must be one of the 10 variants
+        let valid: std::collections::HashSet<String> =
+            (0..10).map(|i| format!("content{i}")).collect();
+        assert!(valid.contains(&content), "stored content must not be corrupted");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn concurrent_link_to_same_dest() {
+        let tmp = std::env::temp_dir().join(format!("grel-cs-link-race-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let store = ContentStore::new(tmp.join("store"));
+
+        let hash = "aabbccdd11223344556677889900aabbccdd11223344556677889900aabbccdd";
+        let source = tmp.join("source.txt");
+        std::fs::write(&source, b"shared").unwrap();
+        store.insert_from_path(&source, hash).unwrap();
+
+        let dest = tmp.join("bin_dir").join("mybin");
+        let mut handles = vec![];
+
+        for _ in 0..10 {
+            let store = ContentStore::new(tmp.join("store"));
+            let dest = dest.clone();
+            handles.push(std::thread::spawn(move || {
+                store.link_to(hash, &dest).ok()
+            }));
+        }
+
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        assert!(dest.exists(), "dest must exist after concurrent link_to calls");
+        assert_eq!(std::fs::read_to_string(&dest).unwrap(), "shared");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn contains_is_not_a_guarantee() {
+        let tmp = std::env::temp_dir().join(format!("grel-cs-toctou-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let store = ContentStore::new(tmp.join("store"));
+
+        let hash = "aabbccdd11223344556677889900aabbccdd11223344556677889900aabbccdd";
+        let source = tmp.join("source.txt");
+        std::fs::write(&source, b"data").unwrap();
+        store.insert_from_path(&source, hash).unwrap();
+
+        assert!(store.contains(hash));
+
+        // Simulate another process/task deleting the file between contains and link_to
+        let stored = store.path_for(hash);
+        std::fs::remove_file(&stored).unwrap();
+
+        let dest = tmp.join("dest.txt");
+        let result = store.link_to(hash, &dest);
+        // Must error gracefully, not panic
+        assert!(result.is_err(), "link_to must fail when stored file was removed after contains()");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn insert_then_immediate_clean() {
+        let tmp = std::env::temp_dir().join(format!("grel-cs-clean-race-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let store = ContentStore::new(tmp.join("store"));
+
+        let hash = "aabbccdd11223344556677889900aabbccdd11223344556677889900aabbccdd";
+        let source = tmp.join("source.txt");
+        std::fs::write(&source, b"data").unwrap();
+        store.insert_from_path(&source, hash).unwrap();
+
+        // Immediately clean everything (age 0 days)
+        store.clean_old(0).unwrap();
+
+        // File may or may not exist depending on mtime granularity; test just verifies no panic
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 }

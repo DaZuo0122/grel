@@ -2781,4 +2781,76 @@ mod tests {
 
         cleanup(&tmp);
     }
+
+    // -----------------------------------------------------------------------
+    // collect_package_files / classify_file_type
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn collect_package_files_finds_all_files() {
+        let tmp = make_temp_dir("collect-files");
+        let install_dir = tmp.join("install");
+        let bin_dir = tmp.join("bin");
+        let archive = tmp.join("archive.tar.gz");
+
+        std::fs::create_dir_all(install_dir.join("sub")).unwrap();
+        std::fs::create_dir_all(install_dir.join("bin")).unwrap();
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        std::fs::write(install_dir.join("README.md"), b"# Hello").unwrap();
+        std::fs::write(install_dir.join("config.toml"), b"[pkg]").unwrap();
+        std::fs::write(install_dir.join("sub").join("lib.so"), b"binary").unwrap();
+        // archive inside install_dir so it is found by the walker
+        std::fs::write(install_dir.join("archive.tar.gz"), b"archive").unwrap();
+        // bin inside install_dir so it is found by the walker
+        std::fs::write(install_dir.join("bin").join("mybin"), b"bin").unwrap();
+
+        let files = collect_package_files(&install_dir, &bin_dir, &archive);
+
+        // Should find: README.md, config.toml, sub/lib.so, archive.tar.gz, bin/mybin
+        assert_eq!(files.len(), 5, "expected 5 files, got {files:?}");
+
+        let paths: Vec<&str> = files.iter().map(|(p, _)| p.as_str()).collect();
+        assert!(paths.iter().any(|p| p.ends_with("README.md")));
+        assert!(paths.iter().any(|p| p.ends_with("config.toml")));
+        assert!(paths.iter().any(|p| p.ends_with("lib.so")));
+        assert!(paths.iter().any(|p| p.ends_with("archive.tar.gz")));
+        assert!(paths.iter().any(|p| p.ends_with("mybin")));
+
+        cleanup(&tmp);
+    }
+
+    #[test]
+    fn classify_file_type_detects_archive_binary_config_doc() {
+        let tmp = make_temp_dir("classify");
+        let bin_dir = tmp.join("bin");
+        let archive = tmp.join("archive.tar.gz");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        std::fs::write(&archive, b"").unwrap();
+        std::fs::write(bin_dir.join("rg"), b"").unwrap();
+
+        assert_eq!(classify_file_type(&archive, &bin_dir, &archive), "archive");
+        assert_eq!(classify_file_type(&bin_dir.join("rg"), &bin_dir, &archive), "binary");
+        assert_eq!(classify_file_type(&tmp.join("config.toml"), &bin_dir, &archive), "config");
+        assert_eq!(classify_file_type(&tmp.join("config.conf"), &bin_dir, &archive), "config");
+        assert_eq!(classify_file_type(&tmp.join("README.md"), &bin_dir, &archive), "doc");
+        assert_eq!(classify_file_type(&tmp.join("data.dat"), &bin_dir, &archive), "data");
+
+        cleanup(&tmp);
+    }
+
+    #[test]
+    fn collect_package_files_empty_dir() {
+        let tmp = make_temp_dir("collect-empty");
+        let install_dir = tmp.join("install");
+        let bin_dir = tmp.join("bin");
+        let archive = tmp.join("archive.tar.gz");
+        std::fs::create_dir_all(&install_dir).unwrap();
+        // No files at all inside install_dir
+
+        let files = collect_package_files(&install_dir, &bin_dir, &archive);
+        // Nothing in empty dir; archive is outside install_dir so not walked
+        assert!(files.is_empty(), "expected empty, got {files:?}");
+
+        cleanup(&tmp);
+    }
 }
