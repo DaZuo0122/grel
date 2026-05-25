@@ -38,6 +38,8 @@ owo-colors.workspace = true
 chrono.workspace = true
 sha2.workspace = true
 serde_json.workspace = true
+serde.workspace = true
+fastrand.workspace = true
 
 [lints]
 workspace = true

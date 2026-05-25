@@ -722,6 +722,19 @@ async fn install_single_package(
         )
     })?;
 
+    // Create crash-recovery journal before any file mutations
+    let mut journal = crate::commands::journal::JournalEntry::new(
+        crate::commands::journal::Operation::Install,
+        &pkg_ref.forge.to_string(),
+        &pkg_ref.owner,
+        &pkg_ref.repo,
+    );
+    journal.install_dir = Some(install_dir.clone());
+    journal.bin_dir = Some(config.paths.bin_dir.clone());
+    journal.archive_path = Some(archive_path.clone());
+    journal.is_managed = is_managed;
+    journal.write()?;
+
     println!(
         "  Downloading: {} ({})",
         chosen_asset.filename,
@@ -834,6 +847,7 @@ async fn install_single_package(
         .collect();
 
     rollback.record_binaries(&bin_filenames);
+    journal.record_old_binaries(&bin_filenames);
 
     // Save manifest and run post_install hook
     if let Some((ref manifest, _)) = manifest {
@@ -915,6 +929,8 @@ async fn install_single_package(
             }
 
             tx.commit().await?;
+            // Crash-recovery: mark operation complete
+            journal.commit()?;
             updated.id.unwrap_or(-1)
         }
         Err(e) => {
@@ -2483,9 +2499,27 @@ async fn upgrade_single_package(
 
     let mut installed_bins: Vec<std::path::PathBuf> = vec![];
 
+    // Create crash-recovery journal before any mutations
+    let mut journal = crate::commands::journal::JournalEntry::new(
+        crate::commands::journal::Operation::Upgrade,
+        &pkg.forge,
+        &pkg.owner,
+        &pkg.repo,
+    );
+    journal.install_dir = Some(install_dir.clone());
+    journal.bin_dir = Some(config.paths.bin_dir.clone());
+    journal.archive_path = Some(archive_path.clone());
+    journal.is_managed = is_managed;
+    journal.record_old_binaries(&pkg.binary_list());
+    journal.write()?;
+
     if is_managed {
         let extracted_dir = install_dir.join("extracted");
         let backup = crate::commands::transaction::backup_directory(&extracted_dir);
+        if let Some(b) = &backup {
+            journal.record_backup(&extracted_dir, b);
+            journal.write()?;
+        }
 
         match grel_network::archive::install_asset(
             &archive_path,
@@ -2573,6 +2607,8 @@ async fn upgrade_single_package(
                 tx.set_package_files(pkg_id, &file_models).await?;
             }
             tx.commit().await?;
+            // Crash-recovery: mark operation complete
+            journal.commit()?;
         }
         Err(e) => {
             return Err(anyhow::anyhow!("Failed to begin database transaction: {e}"));

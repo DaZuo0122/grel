@@ -18,6 +18,7 @@ use grel_core::RemoteAsset;
 
 pub mod database;
 pub mod files;
+pub mod journal;
 pub mod query;
 pub mod remove;
 pub mod sync;

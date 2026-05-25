@@ -24,6 +24,11 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
 
+    // Crash recovery: clean up partial state from previous interrupted runs
+    if let Err(e) = commands::journal::check_and_recover() {
+        eprintln!("Warning: crash recovery check failed: {e}");
+    }
+
     // Load configuration
     let config_path = cli.config.clone().map(std::path::PathBuf::from);
     let config = load_config(config_path.as_deref())?;
@@ -101,7 +106,10 @@ async fn main() -> Result<()> {
                 println!("  grel -Syu                Refresh + upgrade all");
             }
             Operation::Query => {
-                println!("{}", "grel -Q, --query — Inspect local package state".bold());
+                println!(
+                    "{}",
+                    "grel -Q, --query — Inspect local package state".bold()
+                );
                 println!();
                 println!("Usage: grel -Q [OPTIONS] [TARGETS...]");
                 println!();
@@ -141,14 +149,19 @@ async fn main() -> Result<()> {
                 println!("  grel -Ru                 Remove all unneeded packages");
             }
             Operation::Database => {
-                println!("{}", "grel -D, --database — Local DB & state management".bold());
+                println!(
+                    "{}",
+                    "grel -D, --database — Local DB & state management".bold()
+                );
                 println!();
                 println!("Usage: grel -D [OPTIONS] [TARGETS...]");
                 println!();
                 println!("Options:");
                 println!("      --asexplicit         Mark target(s) as explicitly installed");
                 println!("      --asdeps             Mark target(s) as dependencies");
-                println!("      --migrate <OLD> <NEW>  Update owner/repo path for renamed projects");
+                println!(
+                    "      --migrate <OLD> <NEW>  Update owner/repo path for renamed projects"
+                );
                 println!("      --clean              Prune orphaned records and stale caches");
                 println!("      --check              Verify SQLite DB integrity");
                 println!("      --dump               Export state as JSON");
@@ -159,7 +172,10 @@ async fn main() -> Result<()> {
                 println!("  grel -D --asexplicit foo/bar  Mark foo/bar as explicit");
             }
             Operation::Upgrade => {
-                println!("{}", "grel -U, --upgrade — Install from a local archive file".bold());
+                println!(
+                    "{}",
+                    "grel -U, --upgrade — Install from a local archive file".bold()
+                );
                 println!();
                 println!("Usage: grel -U [OPTIONS] [TARGETS...]");
                 println!();
@@ -195,7 +211,7 @@ async fn main() -> Result<()> {
                 println!();
                 println!("Usage: grel <OPERATION> [OPTIONS] [TARGETS...]");
                 println!();
-                println!("Operations (first one wins):");
+                println!("Operations:");
                 println!("  -S, --sync       Fetch & install from forges");
                 println!("  -Q, --query      Inspect local state");
                 println!("  -R, --remove     Uninstall packages");
@@ -318,7 +334,7 @@ async fn main() -> Result<()> {
             println!();
             println!("Usage: grel <OPERATION> [OPTIONS] [TARGETS...]");
             println!();
-            println!("Operations (first one wins):");
+            println!("Operations:");
             println!("  -S, --sync       Fetch & install from forges");
             println!("  -Q, --query      Inspect local state");
             println!("  -R, --remove     Uninstall packages");

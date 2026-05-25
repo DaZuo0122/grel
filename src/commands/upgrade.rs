@@ -94,6 +94,19 @@ pub async fn cmd_upgrade_local(ctx: &CommandContext<'_>) -> Result<()> {
     std::fs::create_dir_all(&install_dir)
         .map_err(|e| anyhow::anyhow!("Failed to create directory: {e}"))?;
 
+    // Create crash-recovery journal before extraction
+    let mut journal = crate::commands::journal::JournalEntry::new(
+        crate::commands::journal::Operation::Install,
+        &pkg_ref.forge.to_string(),
+        &pkg_ref.owner,
+        &pkg_ref.repo,
+    );
+    journal.install_dir = Some(install_dir.clone());
+    journal.bin_dir = Some(ctx.config.paths.bin_dir.clone());
+    journal.archive_path = Some(install_dir.join(&filename));
+    journal.is_managed = true;
+    journal.write()?;
+
     let dest_path = install_dir.join(&filename);
     std::fs::copy(&asset_path, &dest_path)
         .map_err(|e| anyhow::anyhow!("Failed to copy file: {e}"))?;
@@ -189,6 +202,8 @@ pub async fn cmd_upgrade_local(ctx: &CommandContext<'_>) -> Result<()> {
         Ok(mut tx) => {
             tx.upsert_package(&pkg).await?;
             tx.commit().await?;
+            // Crash-recovery: mark operation complete
+            journal.commit()?;
         }
         Err(e) => {
             return Err(anyhow::anyhow!("Failed to begin database transaction: {e}"));
