@@ -254,8 +254,7 @@ pub async fn remove_package_files(
         if manifest_path.exists() {
             if let Ok(content) = std::fs::read_to_string(&manifest_path) {
                 if let Ok(manifest) = grel_core::Manifest::load_from_str(&content) {
-                    if let Some(ref hook) = manifest.hooks.pre_remove {
-                        println!("  Running pre_remove hook...");
+                    if let Some(hook) = manifest.hooks.resolved_pre_remove() {
                         let hook_dir = if install_path.is_dir() {
                             install_path.to_path_buf()
                         } else if let Some(parent) = install_path.parent() {
@@ -263,28 +262,7 @@ pub async fn remove_package_files(
                         } else {
                             std::path::PathBuf::from(".")
                         };
-                        let status = std::process::Command::new("sh")
-                            .arg("-c")
-                            .arg(hook)
-                            .current_dir(&hook_dir)
-                            .status();
-                        match status {
-                            Ok(s) if s.success() => {
-                                println!("  {}", "pre_remove hook completed".green());
-                            }
-                            Ok(s) => {
-                                eprintln!(
-                                    "  {}",
-                                    format!("pre_remove hook exited with status {s}").yellow()
-                                );
-                            }
-                            Err(e) => {
-                                eprintln!(
-                                    "  {}",
-                                    format!("Failed to run pre_remove hook: {e}").yellow()
-                                );
-                            }
-                        }
+                        grel_core::run_hook(hook, &hook_dir, "pre_remove", config.security.allow_sh_hooks_on_windows);
                     }
                 }
             }
@@ -428,7 +406,7 @@ mod tests {
             dependencies: Default::default(),
             hooks: grel_core::HookSpec {
                 pre_remove: Some(format!("touch {}", hook_marker.display())),
-                post_install: Default::default(),
+                ..Default::default()
             },
         };
         let manifest_path = install_dir.join(".grel.toml");
@@ -470,7 +448,7 @@ mod tests {
             dependencies: Default::default(),
             hooks: grel_core::HookSpec {
                 pre_remove: Some(format!("touch {}", hook_marker.display())),
-                post_install: Default::default(),
+                ..Default::default()
             },
         };
         let manifest_path = install_dir.join(".grel.toml");
@@ -486,6 +464,51 @@ mod tests {
         remove_package_files(&config, &pkg, false).await.unwrap();
 
         assert!(!hook_marker.exists(), "pre_remove hook should NOT run when disabled");
+
+        cleanup(&tmp);
+    }
+
+    #[tokio::test]
+    #[cfg(windows)]
+    async fn remove_package_files_runs_pre_remove_hook_on_windows() {
+        let tmp = make_temp_dir("pre-remove-hook-win");
+        let install_dir = tmp.join("install");
+        std::fs::create_dir_all(&install_dir).unwrap();
+
+        let hook_marker = tmp.join("hook_ran.txt");
+
+        // Write a manifest with a pre_remove hook using PowerShell syntax
+        let manifest = grel_core::Manifest {
+            name: "test".into(),
+            description: "".into(),
+            license: "".into(),
+            source: Default::default(),
+            assets: Default::default(),
+            checksum_filename: Default::default(),
+            signature_filename: Default::default(),
+            signature_kind: Default::default(),
+            dependencies: Default::default(),
+            hooks: grel_core::HookSpec {
+                pre_remove: Some(format!(
+                    "Write-Output 'test' | Out-File -FilePath '{}'",
+                    hook_marker.display()
+                )),
+                ..Default::default()
+            },
+        };
+        let manifest_path = install_dir.join(".grel.toml");
+        std::fs::write(&manifest_path, manifest.to_toml().unwrap()).unwrap();
+
+        let mut pkg = InstalledPackage::new("github".into(), "owner".into(), "repo".into());
+        pkg.install_path = install_dir.to_string_lossy().to_string();
+        pkg.is_managed = true;
+        pkg.status = PackageStatus::Active;
+
+        let mut config = grel_config::Config::default();
+        config.security.enable_hooks = true;
+        remove_package_files(&config, &pkg, false).await.unwrap();
+
+        assert!(hook_marker.exists(), "pre_remove hook should have created marker on Windows");
 
         cleanup(&tmp);
     }

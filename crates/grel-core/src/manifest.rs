@@ -209,6 +209,44 @@ pub struct HookSpec {
     /// Script to run before removal
     #[serde(default)]
     pub pre_remove: Option<String>,
+
+    /// Windows-specific `post_install` hook (PowerShell/cmd syntax)
+    #[serde(default, rename = "post_install_windows")]
+    pub post_install_windows: Option<String>,
+
+    /// Windows-specific `pre_remove` hook (PowerShell/cmd syntax)
+    #[serde(default, rename = "pre_remove_windows")]
+    pub pre_remove_windows: Option<String>,
+}
+
+impl HookSpec {
+    /// Resolve the best `post_install` hook for the current platform.
+    #[cfg(windows)]
+    pub fn resolved_post_install(&self) -> Option<&str> {
+        self.post_install_windows
+            .as_deref()
+            .or(self.post_install.as_deref())
+    }
+
+    /// Resolve the best `post_install` hook for the current platform.
+    #[cfg(not(windows))]
+    pub fn resolved_post_install(&self) -> Option<&str> {
+        self.post_install.as_deref()
+    }
+
+    /// Resolve the best `pre_remove` hook for the current platform.
+    #[cfg(windows)]
+    pub fn resolved_pre_remove(&self) -> Option<&str> {
+        self.pre_remove_windows
+            .as_deref()
+            .or(self.pre_remove.as_deref())
+    }
+
+    /// Resolve the best `pre_remove` hook for the current platform.
+    #[cfg(not(windows))]
+    pub fn resolved_pre_remove(&self) -> Option<&str> {
+        self.pre_remove.as_deref()
+    }
 }
 
 /// Manifest errors
@@ -305,5 +343,56 @@ filename = "foo-{version}-win-x64.zip"
         assert!(!mapping.os_matches(&Os::Windows));
         assert!(mapping.arch_matches(&Arch::X86_64));
         assert!(!mapping.arch_matches(&Arch::Aarch64));
+    }
+
+    #[test]
+    fn test_hook_spec_windows_fields_roundtrip() {
+        let toml = r#"
+name = "test"
+
+[hooks]
+post_install = "echo hello"
+pre_remove = "rm -rf foo"
+post_install_windows = "Write-Output hello"
+pre_remove_windows = "Remove-Item -Recurse -Force foo"
+"#;
+
+        let manifest = Manifest::load_from_str(toml).unwrap();
+        assert_eq!(manifest.hooks.post_install.as_deref(), Some("echo hello"));
+        assert_eq!(manifest.hooks.pre_remove.as_deref(), Some("rm -rf foo"));
+        assert_eq!(
+            manifest.hooks.post_install_windows.as_deref(),
+            Some("Write-Output hello")
+        );
+        assert_eq!(
+            manifest.hooks.pre_remove_windows.as_deref(),
+            Some("Remove-Item -Recurse -Force foo")
+        );
+
+        let out = manifest.to_toml().unwrap();
+        assert!(out.contains("post_install_windows"));
+        assert!(out.contains("pre_remove_windows"));
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn test_hook_spec_resolved_post_install_windows() {
+        let hooks = HookSpec {
+            post_install: Some("unix".into()),
+            post_install_windows: Some("win".into()),
+            ..Default::default()
+        };
+        assert_eq!(hooks.resolved_post_install(), Some("win"));
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn test_hook_spec_resolved_post_install_unix() {
+        let hooks = HookSpec {
+            post_install: Some("unix".into()),
+            post_install_windows: Some("win".into()),
+            ..Default::default()
+        };
+        assert_eq!(hooks.resolved_post_install(), Some("unix"));
     }
 }

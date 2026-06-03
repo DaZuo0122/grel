@@ -282,27 +282,6 @@ pub(crate) fn save_manifest_to_dir(
     Ok(())
 }
 
-/// Run a hook script from the package install directory.
-pub(crate) fn run_hook(hook: &str, install_dir: &std::path::Path, label: &str) {
-    println!("  Running {label} hook...");
-    let status = std::process::Command::new("sh")
-        .arg("-c")
-        .arg(hook)
-        .current_dir(install_dir)
-        .status();
-    match status {
-        Ok(s) if s.success() => println!("  {}", format!("{label} hook completed").green()),
-        Ok(s) => eprintln!(
-            "  {}",
-            format!("{label} hook exited with status {s}").yellow()
-        ),
-        Err(e) => eprintln!(
-            "  {}",
-            format!("Failed to run {label} hook: {e}").yellow()
-        ),
-    }
-}
-
 /// Download and parse the upstream checksum file for an asset.
 /// Returns `Some(expected_hash)` when verification is enabled and a checksum file is found.
 async fn fetch_expected_checksum(
@@ -855,8 +834,8 @@ async fn install_single_package(
             tracing::warn!("Failed to save manifest: {e}");
         }
         if !download_only && config.security.enable_hooks {
-            if let Some(ref hook) = manifest.hooks.post_install {
-                run_hook(hook, &install_dir, "post_install");
+            if let Some(hook) = manifest.hooks.resolved_post_install() {
+                grel_core::run_hook(hook, &install_dir, "post_install", config.security.allow_sh_hooks_on_windows);
             }
         }
     }
@@ -1635,8 +1614,8 @@ pub async fn cmd_sync(ctx: &CommandContext<'_>, packages: &[String]) -> Result<(
                 tracing::warn!("Failed to save manifest: {e}");
             }
             if !ctx.cli.download_only && ctx.config.security.enable_hooks {
-                if let Some(ref hook) = manifest.hooks.post_install {
-                    run_hook(hook, &install_dir, "post_install");
+                if let Some(hook) = manifest.hooks.resolved_post_install() {
+                    grel_core::run_hook(hook, &install_dir, "post_install", ctx.config.security.allow_sh_hooks_on_windows);
                 }
             }
         }
@@ -2770,50 +2749,6 @@ mod tests {
         let content = std::fs::read_to_string(&manifest_path).unwrap();
         assert!(content.contains("test-pkg"), "manifest should contain package name");
         assert!(content.contains("MIT"), "manifest should contain license");
-
-        cleanup(&tmp);
-    }
-
-    // -----------------------------------------------------------------------
-    // run_hook
-    // -----------------------------------------------------------------------
-
-    #[test]
-    #[cfg(unix)]
-    fn run_hook_executes_successfully() {
-        let tmp = make_temp_dir("run-hook");
-        let marker = tmp.join("hook_ran");
-
-        run_hook(
-            &format!("touch {}", marker.display()),
-            &tmp,
-            "post_install",
-        );
-
-        assert!(marker.exists(), "hook should have created marker file");
-
-        cleanup(&tmp);
-    }
-
-    #[test]
-    #[cfg(unix)]
-    fn run_hook_handles_failure_gracefully() {
-        let tmp = make_temp_dir("run-hook-fail");
-
-        // This should not panic
-        run_hook("exit 1", &tmp, "pre_remove");
-
-        cleanup(&tmp);
-    }
-
-    #[test]
-    #[cfg(windows)]
-    fn run_hook_graceful_on_windows() {
-        let tmp = make_temp_dir("run-hook-win");
-
-        // run_hook uses 'sh' which is not available on Windows;
-        // it should print a warning but not panic.
-        run_hook("echo hello", &tmp, "post_install");
 
         cleanup(&tmp);
     }

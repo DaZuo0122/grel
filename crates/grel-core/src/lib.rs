@@ -8,6 +8,7 @@
 mod asset;
 mod checksum;
 mod dependency;
+mod hook_runner;
 mod manifest;
 mod package_ref;
 mod platform;
@@ -18,6 +19,7 @@ mod signature;
 pub use asset::*;
 pub use checksum::*;
 pub use dependency::*;
+pub use hook_runner::*;
 pub use manifest::*;
 pub use signature::*;
 pub use package_ref::*;

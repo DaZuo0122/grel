@@ -359,6 +359,12 @@ pub struct SecurityConfig {
     #[serde(default = "default_enable_hooks")]
     pub enable_hooks: bool,
 
+    /// Allow `.sh` hooks to run on Windows.
+    /// Disabled by default because Unix shell scripts rarely work
+    /// correctly in a Windows environment.
+    #[serde(default = "default_allow_sh_hooks_on_windows")]
+    pub allow_sh_hooks_on_windows: bool,
+
     /// Trusted PGP public keys (ASCII-armored or binary, one per element).
     /// Used to verify GPG detached signatures when verify_signatures is true.
     #[serde(default)]
@@ -376,6 +382,7 @@ impl Default for SecurityConfig {
             verify_signatures: default_verify_signatures(),
             verify_checksums: default_verify_checksums(),
             enable_hooks: default_enable_hooks(),
+            allow_sh_hooks_on_windows: default_allow_sh_hooks_on_windows(),
             trusted_pgp_keys: Vec::new(),
             minisign_public_key: None,
         }
@@ -391,6 +398,10 @@ fn default_verify_checksums() -> bool {
 }
 
 fn default_enable_hooks() -> bool {
+    false
+}
+
+fn default_allow_sh_hooks_on_windows() -> bool {
     false
 }
 
@@ -568,6 +579,7 @@ verify_signatures = true
         let config = load_config(Some(&config_path)).unwrap();
         assert_eq!(config.general.max_concurrent, 8);
         assert!(config.security.verify_signatures);
+        assert!(!config.security.allow_sh_hooks_on_windows);
 
         // Cleanup
         let _ = std::fs::remove_dir_all(&tmp);
@@ -580,6 +592,7 @@ verify_signatures = true
         assert_eq!(config.general.max_concurrent, DEFAULT_MAX_CONCURRENT);
         assert!(!config.security.verify_signatures);
         assert!(config.security.verify_checksums);
+        assert!(!config.security.allow_sh_hooks_on_windows);
     }
 
     #[test]
